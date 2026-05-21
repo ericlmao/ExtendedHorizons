@@ -9,6 +9,9 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -19,11 +22,14 @@ public final class PacketIdRegistry {
     private static final Logger LOGGER = LoggerFactory.getLogger(PacketIdRegistry.class);
     private static final int UNRESOLVED = -1;
     private static final String[] PACKET_ID_METHODS = {"packetId", "id", "getId"};
+    private static final String[] PROTOCOL_INFO_METHODS = {"packetId", "id"};
 
     private static final AtomicInteger LEVEL_CHUNK_WITH_LIGHT_ID = new AtomicInteger(UNRESOLVED);
     private static final AtomicInteger CHUNK_CACHE_RADIUS_ID = new AtomicInteger(UNRESOLVED);
     private static final AttributeKey<Boolean> PENDING_LEVEL_CHUNK_PROBE = AttributeKey.valueOf("eh_pending_level_chunk_probe");
     private static final AttributeKey<Boolean> PENDING_RADIUS_PROBE = AttributeKey.valueOf("eh_pending_radius_probe");
+    private static final ConcurrentMap<Class<?>, Boolean> PACKET_ID_LOOKUP_CLASSES = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<Class<?>, Optional<Method>> PACKET_ID_LOOKUP_METHODS = new ConcurrentHashMap<>();
     private static volatile boolean encoderResolveAttempted;
 
     private PacketIdRegistry() {}
@@ -112,6 +118,7 @@ public final class PacketIdRegistry {
             if (protocolInfo == null) {
                 return;
             }
+            encoderResolveAttempted = true;
             
             int chunkPacketId = lookupPacketId(protocolInfo, ClientboundLevelChunkWithLightPacket.class);
             if (chunkPacketId >= 0) {
@@ -121,10 +128,6 @@ public final class PacketIdRegistry {
             int radiusPacketId = lookupPacketId(protocolInfo, net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket.class);
             if (radiusPacketId >= 0) {
                 resolveChunkCacheRadiusId(radiusPacketId);
-            }
-            
-            if (hasLevelChunkWithLightId() && hasChunkCacheRadiusId()) {
-                encoderResolveAttempted = true;
             }
         } catch (Throwable throwable) {
             LOGGER.error("EH encoder resolve: unexpected error", throwable);
@@ -161,60 +164,60 @@ public final class PacketIdRegistry {
     }
 
     private static boolean hasPacketIdLookup(Object obj) {
-        Class<?> clazz = obj.getClass();
-        for (Method method : clazz.getMethods()) {
-            if (isPacketIdMethod(method)) {
-                return true;
-            }
-        }
-        for (Method method : clazz.getDeclaredMethods()) {
-            if (isPacketIdMethod(method)) {
+        return PACKET_ID_LOOKUP_CLASSES.computeIfAbsent(obj.getClass(), PacketIdRegistry::hasPacketIdLookupMethod);
+    }
+
+    private static boolean hasPacketIdLookupMethod(Class<?> clazz) {
+        for (String methodName : PROTOCOL_INFO_METHODS) {
+            if (findMethod(clazz, methodName) != null) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean isPacketIdMethod(Method method) {
-        String name = method.getName();
-        return (name.equals("packetId") || name.equals("id"))
-            && method.getParameterCount() == 1
-            && method.getReturnType() == int.class;
-    }
-
     private static int lookupPacketId(Object protocolInfo, Class<?> packetClass) {
-        for (String methodName : PACKET_ID_METHODS) {
-            Method method = findMethod(protocolInfo.getClass(), methodName);
-            if (method == null) {
-                continue;
+        Optional<Method> lookupMethod = findPacketIdLookupMethod(protocolInfo.getClass());
+        if (lookupMethod.isEmpty()) {
+            return -1;
+        }
+        Method method = lookupMethod.get();
+        try {
+            method.setAccessible(true);
+            Object result = method.invoke(protocolInfo, packetClass);
+            if (result instanceof Number num) {
+                return num.intValue();
             }
-            Class<?> paramType = method.getParameterTypes()[0];
-            if (paramType != Class.class) {
-                continue;
-            }
-            try {
-                method.setAccessible(true);
-                Object result = method.invoke(protocolInfo, packetClass);
-                if (result instanceof Number num) {
-                    return num.intValue();
-                }
-            } catch (Throwable throwable) {
-                LOGGER.debug("EH encoder resolve: method {}.{}() failed", protocolInfo.getClass().getSimpleName(), methodName, throwable);
-            }
+        } catch (Throwable throwable) {
+            LOGGER.debug("EH encoder resolve: method {}.{}() failed", protocolInfo.getClass().getSimpleName(), method.getName(), throwable);
         }
         return -1;
+    }
+
+    private static Optional<Method> findPacketIdLookupMethod(Class<?> clazz) {
+        return PACKET_ID_LOOKUP_METHODS.computeIfAbsent(clazz, PacketIdRegistry::scanPacketIdLookupMethod);
+    }
+
+    private static Optional<Method> scanPacketIdLookupMethod(Class<?> clazz) {
+        for (String methodName : PACKET_ID_METHODS) {
+            Method method = findMethod(clazz, methodName);
+            if (method != null) {
+                return Optional.of(method);
+            }
+        }
+        return Optional.empty();
     }
 
     private static Method findMethod(Class<?> clazz, String name) {
         for (Method method : clazz.getMethods()) {
             if (method.getName().equals(name) && method.getParameterCount() == 1
-                && isValidReturnType(method.getReturnType())) {
+                && isValidReturnType(method.getReturnType()) && method.getParameterTypes()[0] == Class.class) {
                 return method;
             }
         }
         for (Method method : clazz.getDeclaredMethods()) {
             if (method.getName().equals(name) && method.getParameterCount() == 1
-                && isValidReturnType(method.getReturnType())) {
+                && isValidReturnType(method.getReturnType()) && method.getParameterTypes()[0] == Class.class) {
                 return method;
             }
         }
