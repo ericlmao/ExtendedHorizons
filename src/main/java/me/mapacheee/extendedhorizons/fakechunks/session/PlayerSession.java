@@ -51,6 +51,7 @@ public final class PlayerSession {
     private final Deque<ChunkSendQueueEntry> chunkQueue = new ConcurrentLinkedDeque<>();
     private final Map<UUID, Integer> trackedFarPlayers = new ConcurrentHashMap<>();
     private final Set<UUID> trackingBuffer = new HashSet<>();
+    private final Set<Integer> usedFarEntityIdBuffer = new HashSet<>();
     private final Set<Integer> serverTrackedEntityIds = ConcurrentHashMap.newKeySet();
     private volatile double moveDirX;
     private volatile double moveDirZ;
@@ -85,6 +86,10 @@ public final class PlayerSession {
 
     public Set<UUID> trackingBuffer() {
         return this.trackingBuffer;
+    }
+
+    public Set<Integer> usedFarEntityIdBuffer() {
+        return this.usedFarEntityIdBuffer;
     }
 
     public boolean enabled() {
@@ -462,6 +467,7 @@ public final class PlayerSession {
         }
         this.clearChunkQueue();
         this.trackingBuffer.clear();
+        this.usedFarEntityIdBuffer.clear();
         this.serverTrackedEntityIds.clear();
         this.hasMovementDirection = false;
         this.lastChunkCrossNanos = 0L;
@@ -475,6 +481,7 @@ public final class PlayerSession {
     public void clearDispatchState() {
         this.clearChunkQueue();
         this.trackingBuffer.clear();
+        this.usedFarEntityIdBuffer.clear();
         this.serverTrackedEntityIds.clear();
         this.resetBandwidthLimiter();
         this.lastAdvertisedDistance = -1;
@@ -655,4 +662,3 @@ public final class PlayerSession {
         }
     }
 }
-
