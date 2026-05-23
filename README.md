@@ -1,3 +1,5 @@
+> **Notice:** This is an ultra-performance fork of the original ExtendedHorizons project. Builds of the plugin are available at [https://ci.moonrise.gg/job/ExtendedHorizons/](https://ci.moonrise.gg/job/ExtendedHorizons/).
+
 <div align="center">
   <img width="1080" height="462" alt="eh_main(1)(1)" src="https://i.imgur.com/cJ3108T.png" />
 </div>
