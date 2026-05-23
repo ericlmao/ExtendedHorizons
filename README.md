@@ -18,10 +18,13 @@ It renders distant terrain using optimized fake chunks and optional far-player s
 ---
 ## How to build
 
-Build this project with this command: 
+Build this project with this command:
 ```cmd
 ./gradlew shadowJar
 ```
+
+On macOS, run the same command from Terminal. The Gradle wrapper uses Java 21 to start Gradle when available, and Gradle will automatically provision the Java 25 toolchain used to compile the plugin.
+
 The artifact will be generated in `build/libs/ExtendedHorizons-{version}.jar` ready to use!
 
 ---
