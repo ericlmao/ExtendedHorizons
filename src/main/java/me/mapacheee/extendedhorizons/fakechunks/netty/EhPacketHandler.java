@@ -21,8 +21,6 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.ChunkPos;
 
 import java.util.UUID;
-import java.util.List;
-import java.util.ArrayList;
 
 public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
 
@@ -48,9 +46,6 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
         if (msg instanceof ClientboundLevelChunkWithLightPacket) {
             PacketIdRegistry.markPendingLevelChunkProbe(ctx.channel());
         }
-        if (msg instanceof net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket) {
-            PacketIdRegistry.markPendingRadiusProbe(ctx.channel());
-        }
         PlayerSession trackingSession = this.session;
         if (trackingSession != null) {
             this.captureEntityTracking(ctx, msg, trackingSession);
@@ -73,21 +68,10 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
         if (msg instanceof BundlePacket<?> bundle) {
             PlayerSession session = this.session;
             if (session != null && session.enabled()) {
-                boolean hasRadius = false;
-                List<Packet<?>> filtered = new ArrayList<>();
-                for (Packet<?> sub : bundle.subPackets()) {
-                    if (sub instanceof ClientboundSetChunkCacheRadiusPacket) {
-                        hasRadius = true;
-                    } else {
-                        filtered.add(sub);
-                    }
-                }
-                if (hasRadius) {
+                if (hasRadiusPacket(bundle)) {
                     session.lastAdvertisedDistance(-1);
                     ReferenceCountUtil.release(msg);
-                    for (Packet<?> p : filtered) {
-                        ctx.write(p);
-                    }
+                    writeBundleWithoutRadius(ctx, bundle);
                     promise.setSuccess();
                     return;
                 }
@@ -95,6 +79,9 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
         }
         if (msg instanceof EhBypassPacket(Object payload)) {
             msg = payload;
+        }
+        if (msg instanceof ClientboundSetChunkCacheRadiusPacket) {
+            PacketIdRegistry.markPendingRadiusProbe(ctx.channel());
         }
         super.write(ctx, msg, promise);
     }
@@ -140,6 +127,23 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
             position++;
         }
         throw new IllegalArgumentException("VarInt too big");
+    }
+
+    private static boolean hasRadiusPacket(BundlePacket<?> bundle) {
+        for (Packet<?> sub : bundle.subPackets()) {
+            if (sub instanceof ClientboundSetChunkCacheRadiusPacket) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void writeBundleWithoutRadius(ChannelHandlerContext ctx, BundlePacket<?> bundle) {
+        for (Packet<?> sub : bundle.subPackets()) {
+            if (!(sub instanceof ClientboundSetChunkCacheRadiusPacket)) {
+                ctx.write(sub);
+            }
+        }
     }
 
     private boolean handle(Object input) {
@@ -210,7 +214,7 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
                 } catch (Throwable ignored) {
                 }
             }
-            default -> {}
+            default -> { }
         }
     }
 
