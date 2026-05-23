@@ -18,10 +18,10 @@ jobs:
       - name: Checkout ExtendedHorizons
         uses: actions/checkout@v4
 
-      - name: Set up JDK 25
+      - name: Set up JDK 21 for dependencies
         uses: actions/setup-java@v4
         with:
-          java-version: '25'
+          java-version: '21'
           distribution: 'temurin'
           cache: 'gradle'
 
@@ -76,6 +76,13 @@ jobs:
           cd deps/mapacheeelib
           chmod +x gradlew
           ./gradlew publishToMavenLocal --no-daemon
+
+      - name: Set up JDK 25 for ExtendedHorizons
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: 'gradle'
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v3
