@@ -74,6 +74,7 @@ jobs:
       - name: Publish MapacheeeLib to MavenLocal
         run: |
           cd deps/mapacheeelib
+          printf "rootProject.name = 'MapacheeeLib'\n" > settings.gradle
           chmod +x gradlew
           ./gradlew publishToMavenLocal --no-daemon
 
