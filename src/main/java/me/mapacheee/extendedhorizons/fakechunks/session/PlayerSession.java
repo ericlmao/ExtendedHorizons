@@ -40,6 +40,7 @@ public final class PlayerSession {
     private volatile long[] chunksInDistance = EMPTY_LONG_ARRAY;
     private volatile ChunkState[] chunkStates = new ChunkState[0];
     private volatile int lastAdvertisedDistance = -1;
+    private volatile long lastAdvertisedChunkKey = ChunkKeyCodec.pack(Integer.MIN_VALUE, Integer.MIN_VALUE);
     private volatile int serverViewDistance = 2;
     private volatile int playerOverrideDistance = -1;
     private volatile boolean bandwidthLimiterEnabled;
@@ -108,6 +109,14 @@ public final class PlayerSession {
 
     public void lastAdvertisedDistance(int lastAdvertisedDistance) {
         this.lastAdvertisedDistance = lastAdvertisedDistance;
+    }
+
+    public long lastAdvertisedChunkKey() {
+        return this.lastAdvertisedChunkKey;
+    }
+
+    public void lastAdvertisedChunkKey(long key) {
+        this.lastAdvertisedChunkKey = key;
     }
 
     public int serverViewDistance() {
@@ -250,6 +259,7 @@ public final class PlayerSession {
             return;
         }
         this.chunkKey = newKey;
+        this.iterationIndex = 0;
 
         if (!this.enabled || this.chunkStates.length == 0) {
             return;
@@ -350,6 +360,7 @@ public final class PlayerSession {
         }
         if (lc == ChunkLifecycle.SERVER_LOADED) {
             state.set(chunkX, chunkZ, ChunkLifecycle.UNLOADED);
+            this.iterationIndex = 0;
             return true;
         }
         return false;
@@ -379,7 +390,6 @@ public final class PlayerSession {
                 return ChunkKeyCodec.pack(chunkX, chunkZ);
             }
         }
-        this.iterationIndex = 0;
         return null;
     }
 
@@ -387,6 +397,7 @@ public final class PlayerSession {
         ChunkState state = this.getStateByKey(chunkKey);
         if (state.lifecycle() == ChunkLifecycle.EH_QUEUED) {
             state.markBuildFailed();
+            this.iterationIndex = 0;
         }
     }
 
@@ -458,6 +469,7 @@ public final class PlayerSession {
         this.enabled = false;
         this.iterationIndex = 0;
         this.lastAdvertisedDistance = -1;
+        this.lastAdvertisedChunkKey = ChunkKeyCodec.pack(Integer.MIN_VALUE, Integer.MIN_VALUE);
     }
 
     public void clearDispatchState() {
@@ -466,6 +478,7 @@ public final class PlayerSession {
         this.serverTrackedEntityIds.clear();
         this.resetBandwidthLimiter();
         this.lastAdvertisedDistance = -1;
+        this.lastAdvertisedChunkKey = ChunkKeyCodec.pack(Integer.MIN_VALUE, Integer.MIN_VALUE);
         this.enabled = false;
         this.initiated = false;
         this.iterationIndex = 0;

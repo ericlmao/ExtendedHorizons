@@ -8,8 +8,13 @@ import me.mapacheee.extendedhorizons.config.EhConfig;
 import me.mapacheee.extendedhorizons.fakechunks.dispatch.ChunkDispatchService;
 import me.mapacheee.extendedhorizons.fakechunks.netty.ChannelInjectionService;
 import me.mapacheee.extendedhorizons.fakechunks.farplayers.FarPlayerTrackingService;
+import me.mapacheee.extendedhorizons.fakechunks.farplayers.cache.FarPlayerCacheService;
+import me.mapacheee.extendedhorizons.fakechunks.farplayers.model.FarPlayerState;
 import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
 import me.mapacheee.extendedhorizons.fakechunks.session.SessionRegistry;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket;
@@ -43,6 +48,7 @@ public final class FakeChunkOrchestratorService {
     private final ChunkDispatchService dispatchService;
     private final ChannelInjectionService channelInjectionService;
     private final FarPlayerTrackingService farPlayerTrackingService;
+    private final FarPlayerCacheService farPlayerCacheService;
     private Cache<UUID, PermissionCacheEntry> permissionCache;
 
     @Inject
@@ -51,13 +57,15 @@ public final class FakeChunkOrchestratorService {
         SessionRegistry sessionRegistry,
         ChunkDispatchService dispatchService,
         ChannelInjectionService channelInjectionService,
-        FarPlayerTrackingService farPlayerTrackingService
+        FarPlayerTrackingService farPlayerTrackingService,
+        FarPlayerCacheService farPlayerCacheService
     ) {
         this.configContainer = configContainer;
         this.sessionRegistry = sessionRegistry;
         this.dispatchService = dispatchService;
         this.channelInjectionService = channelInjectionService;
         this.farPlayerTrackingService = farPlayerTrackingService;
+        this.farPlayerCacheService = farPlayerCacheService;
         this.rebuildPermissionCache();
     }
 
@@ -99,6 +107,39 @@ public final class FakeChunkOrchestratorService {
         int targetDistance = this.resolveClientDistance(player, worldName);
         int serverDistance = this.resolveServerDistance(player);
 
+        boolean chunkChanged = session.hasChunkChanged(chunkX, chunkZ);
+        boolean distanceChanged = (session.lastAdvertisedDistance() != targetDistance || session.distance() != targetDistance);
+        boolean farPlayersEnabled = this.configContainer.get().farPlayersEnabled();
+        int moveTicks = this.configContainer.get().farPlayerMoveTicks();
+        boolean isFarPlayerTick = farPlayersEnabled && session.enabled() && (Bukkit.getCurrentTick() % moveTicks == 0);
+        boolean needsQueueProcessing = !session.chunkQueue().isEmpty();
+
+        boolean shouldTick = !session.initiated()
+            || chunkChanged
+            || distanceChanged
+            || needsQueueProcessing
+            || isFarPlayerTick;
+
+        if (!shouldTick) {
+            return;
+        }
+
+        List<FarPlayerState> visibleCandidates = new ArrayList<>();
+        if (this.configContainer.get().farPlayersEnabled()) {
+            Collection<FarPlayerState> candidates = this.farPlayerCacheService.getNearbyPlayers(
+                world.getUID(), chunkX, chunkZ, targetDistance
+            );
+            for (FarPlayerState state : candidates) {
+                if (state.uuid().equals(player.getUniqueId())) {
+                    continue;
+                }
+                Player target = Bukkit.getPlayer(state.uuid());
+                if (target != null && target.isOnline() && player.canSee(target)) {
+                    visibleCandidates.add(state);
+                }
+            }
+        }
+
         TickSnapshot snapshot = new TickSnapshot(
             world,
             world.getUID(),
@@ -107,7 +148,8 @@ public final class FakeChunkOrchestratorService {
             chunkZ,
             loc.getYaw(),
             targetDistance,
-            serverDistance
+            serverDistance,
+            visibleCandidates
         );
         this.channelInjectionService.executeOnEventLoop(channel, () -> this.processOnNetty(channel, session, snapshot));
     }
@@ -141,17 +183,17 @@ public final class FakeChunkOrchestratorService {
             return;
         }
 
-        this.syncClientCenter(channel, snapshot.chunkX(), snapshot.chunkZ());
+        this.syncClientCenter(channel, session, snapshot.chunkX(), snapshot.chunkZ());
         this.syncClientRadius(channel, session, snapshot.targetDistance());
 
         if (this.configContainer.get().farPlayersEnabled()) {
             this.farPlayerTrackingService.track(
                 snapshot.viewerId(),
-                snapshot.worldId(),
                 ChunkKeyCodec.pack(snapshot.chunkX(), snapshot.chunkZ()),
                 session,
                 channel,
-                snapshot.targetDistance()
+                snapshot.targetDistance(),
+                snapshot.visibleCandidates()
             );
         } else {
             this.farPlayerTrackingService.clearTracked(channel, session);
@@ -185,8 +227,13 @@ public final class FakeChunkOrchestratorService {
         return true;
     }
 
-    private void syncClientCenter(Channel channel, int chunkX, int chunkZ) {
+    private void syncClientCenter(Channel channel, PlayerSession session, int chunkX, int chunkZ) {
+        long key = ChunkKeyCodec.pack(chunkX, chunkZ);
+        if (session.lastAdvertisedChunkKey() == key) {
+            return;
+        }
         this.channelInjectionService.writeBypass(channel, new ClientboundSetChunkCacheCenterPacket(chunkX, chunkZ));
+        session.lastAdvertisedChunkKey(key);
     }
 
     private void syncClientRadius(Channel channel, PlayerSession session, int targetDistance) {
@@ -307,7 +354,8 @@ public final class FakeChunkOrchestratorService {
         int chunkZ,
         float yaw,
         int targetDistance,
-        int serverDistance
+        int serverDistance,
+        Collection<FarPlayerState> visibleCandidates
     ) {}
 
     private record PermissionCacheEntry(int permissionCap, boolean hasBypass) {}
