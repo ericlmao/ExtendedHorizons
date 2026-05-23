@@ -16,7 +16,6 @@ import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.LongStream;
 
 public final class PlayerSession {
 
@@ -442,13 +441,23 @@ public final class PlayerSession {
         if (this.chunkStates.length == 0) {
             return EMPTY_LONG_ARRAY;
         }
-        LongStream.Builder builder = LongStream.builder();
+        int count = 0;
         for (ChunkState state : this.chunkStates) {
             if (state.lifecycle() == ChunkLifecycle.EH_LOADED) {
-                builder.add(ChunkKeyCodec.pack(state.chunkX(), state.chunkZ()));
+                count++;
             }
         }
-        return builder.build().toArray();
+        if (count == 0) {
+            return EMPTY_LONG_ARRAY;
+        }
+        long[] keys = new long[count];
+        int index = 0;
+        for (ChunkState state : this.chunkStates) {
+            if (state.lifecycle() == ChunkLifecycle.EH_LOADED) {
+                keys[index++] = ChunkKeyCodec.pack(state.chunkX(), state.chunkZ());
+            }
+        }
+        return keys;
     }
 
     public void unloadEhChunks() {

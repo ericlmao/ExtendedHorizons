@@ -3,6 +3,7 @@ package me.mapacheee.extendedhorizons.fakechunks.cache;
 import com.google.inject.Inject;
 import com.thewinterframework.configurate.Container;
 import com.thewinterframework.service.annotation.Service;
+import com.thewinterframework.service.annotation.lifecycle.OnDisable;
 import io.netty.buffer.ByteBuf;
 import io.netty.util.ReferenceCountUtil;
 import me.mapacheee.extendedhorizons.config.EhConfig;
@@ -40,6 +41,8 @@ public final class AntiXrayPayloadCacheService {
         int ttlSeconds = Math.max(1, this.configContainer.get().cacheTtlSeconds());
         int maxEntries = Math.max(MIN_CACHE_ENTRIES, this.configContainer.get().cacheMaxEntries() / MAX_ENTRIES_DIVISOR);
         int profileHashMaxEntries = Math.max(MIN_PROFILE_ENTRIES, maxEntries / PROFILE_HASH_DIVISOR);
+        Cache<AntiXrayPayloadKey, ByteBuf> oldCache = this.cache;
+        Cache<UUID, ProfileHashEntry> oldProfileHashCache = this.profileHashCache;
 
         this.cache = Caffeine.newBuilder()
             .maximumSize(maxEntries)
@@ -51,6 +54,9 @@ public final class AntiXrayPayloadCacheService {
             .maximumSize(profileHashMaxEntries)
             .expireAfterWrite(Duration.ofSeconds(ttlSeconds))
             .build();
+
+        drainCache(oldCache);
+        drainCache(oldProfileHashCache);
     }
 
     public String resolveProfileHash(World world, EhConfig config) {
@@ -126,6 +132,12 @@ public final class AntiXrayPayloadCacheService {
     public void invalidateAll() {
         this.cache.invalidateAll();
         this.profileHashCache.invalidateAll();
+        this.cleanUp();
+    }
+
+    @OnDisable
+    public void onDisable() {
+        this.invalidateAll();
     }
 
     private record AntiXrayPayloadKey(
@@ -141,6 +153,13 @@ public final class AntiXrayPayloadCacheService {
         List<String> hiddenBlocks,
         String profileHash
     ) {}
-}
 
+    private static void drainCache(Cache<?, ?> cache) {
+        if (cache == null) {
+            return;
+        }
+        cache.invalidateAll();
+        cache.cleanUp();
+    }
+}
 

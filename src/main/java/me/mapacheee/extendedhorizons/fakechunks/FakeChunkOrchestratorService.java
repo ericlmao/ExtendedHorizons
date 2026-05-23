@@ -14,6 +14,7 @@ import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
 import me.mapacheee.extendedhorizons.fakechunks.session.SessionRegistry;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
@@ -124,20 +125,22 @@ public final class FakeChunkOrchestratorService {
             return;
         }
 
-        List<FarPlayerState> visibleCandidates = new ArrayList<>();
+        Collection<FarPlayerState> visibleCandidates = Collections.emptyList();
         if (this.configContainer.get().farPlayersEnabled()) {
             Collection<FarPlayerState> candidates = this.farPlayerCacheService.getNearbyPlayers(
                 world.getUID(), chunkX, chunkZ, targetDistance
             );
+            List<FarPlayerState> visible = new ArrayList<>();
             for (FarPlayerState state : candidates) {
                 if (state.uuid().equals(player.getUniqueId())) {
                     continue;
                 }
                 Player target = Bukkit.getPlayer(state.uuid());
                 if (target != null && target.isOnline() && player.canSee(target)) {
-                    visibleCandidates.add(state);
+                    visible.add(state);
                 }
             }
+            visibleCandidates = visible;
         }
 
         TickSnapshot snapshot = new TickSnapshot(
@@ -360,4 +363,3 @@ public final class FakeChunkOrchestratorService {
 
     private record PermissionCacheEntry(int permissionCap, boolean hasBypass) {}
 }
-
