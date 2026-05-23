@@ -16,3 +16,15 @@ dependencies:
     PlaceholderAPI:
       load: BEFORE
       required: false
+
+commands:
+  extendedhorizons:
+    description: Main ExtendedHorizons command
+    usage: /<command>
+    aliases: [eh]
+    permission: extendedhorizons.use
+
+permissions:
+  extendedhorizons.use:
+    description: Basic permission to use ExtendedHorizons
+    default: true
