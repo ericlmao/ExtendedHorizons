@@ -468,6 +468,7 @@ public final class PlayerSession {
             }
         }
         this.clearChunkQueue();
+        this.usedFarEntityIdBuffer.clear();
     }
 
     public void handleDimensionReset() {

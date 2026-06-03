@@ -20,21 +20,22 @@ import net.minecraft.network.protocol.game.ClientboundStartConfigurationPacket;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.ChunkPos;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.util.UUID;
 
 public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
 
     private static final int VARINT_MAX_BYTES = 5;
-    private static final java.lang.reflect.Field CHUNK_POS_X;
-    private static final java.lang.reflect.Field CHUNK_POS_Z;
+    private static final MethodHandle CHUNK_POS_X_GETTER;
+    private static final MethodHandle CHUNK_POS_Z_GETTER;
 
     static {
         try {
-            CHUNK_POS_X = ChunkPos.class.getDeclaredField("x");
-            CHUNK_POS_X.setAccessible(true);
-            CHUNK_POS_Z = ChunkPos.class.getDeclaredField("z");
-            CHUNK_POS_Z.setAccessible(true);
-        } catch (NoSuchFieldException e) {
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ChunkPos.class, MethodHandles.lookup());
+            CHUNK_POS_X_GETTER = lookup.findGetter(ChunkPos.class, "x", int.class);
+            CHUNK_POS_Z_GETTER = lookup.findGetter(ChunkPos.class, "z", int.class);
+        } catch (ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
         }
     }
@@ -45,6 +46,9 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         if (msg instanceof ClientboundLevelChunkWithLightPacket) {
             PacketIdRegistry.markPendingLevelChunkProbe(ctx.channel());
+        }
+        if (msg instanceof ClientboundSetChunkCacheRadiusPacket) {
+            PacketIdRegistry.markPendingRadiusProbe(ctx.channel());
         }
         PlayerSession trackingSession = this.session;
         if (trackingSession != null) {
@@ -79,9 +83,6 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
         }
         if (msg instanceof EhBypassPacket(Object payload)) {
             msg = payload;
-        }
-        if (msg instanceof ClientboundSetChunkCacheRadiusPacket) {
-            PacketIdRegistry.markPendingRadiusProbe(ctx.channel());
         }
         super.write(ctx, msg, promise);
     }
@@ -162,8 +163,10 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
             case ClientboundForgetLevelChunkPacket packet -> {
                 ChunkPos pos = packet.pos();
                 try {
-                    yield session.serverChunkRemove(CHUNK_POS_X.getInt(pos), CHUNK_POS_Z.getInt(pos));
-                } catch (IllegalAccessException e) {
+                    yield session.serverChunkRemove(
+                        (int) CHUNK_POS_X_GETTER.invokeExact(pos),
+                        (int) CHUNK_POS_Z_GETTER.invokeExact(pos));
+                } catch (Throwable e) {
                     yield false;
                 }
             }
