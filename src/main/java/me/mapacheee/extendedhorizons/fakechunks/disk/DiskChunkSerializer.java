@@ -25,9 +25,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
-import java.util.ArrayList;
 import java.util.BitSet;
-import java.util.List;
 
 
 public final class DiskChunkSerializer {
@@ -211,23 +209,31 @@ public final class DiskChunkSerializer {
     private static void writeLightData(ByteBuf buf, byte[][] blockLight, byte[][] skyLight) {
         int count = blockLight.length;
 
-        List<byte[]> skyData = new ArrayList<>(count);
-        BitSet notSkyEmpty = new BitSet();
-        BitSet skyEmpty = new BitSet();
+        BitSet notSkyEmpty = new BitSet(count);
+        BitSet skyEmpty = new BitSet(count);
+        BitSet notBlockEmpty = new BitSet(count);
+        BitSet blockEmpty = new BitSet(count);
 
-        List<byte[]> blockData = new ArrayList<>(count);
-        BitSet notBlockEmpty = new BitSet();
-        BitSet blockEmpty = new BitSet();
+        int skyDataCount = 0;
+        int blockDataCount = 0;
 
         for (int i = 0; i < count; i++) {
-            byte[] sky   = (skyLight != null) ? skyLight[i] : null;
+            byte[] sky = (skyLight != null) ? skyLight[i] : null;
             byte[] block = blockLight[i];
 
-            if (sky == null) { skyEmpty.set(i); }
-            else { notSkyEmpty.set(i); skyData.add(sky); }
+            if (sky == null) {
+                skyEmpty.set(i);
+            } else {
+                notSkyEmpty.set(i);
+                skyDataCount++;
+            }
 
-            if (block == null) { blockEmpty.set(i); }
-            else { notBlockEmpty.set(i); blockData.add(block); }
+            if (block == null) {
+                blockEmpty.set(i);
+            } else {
+                notBlockEmpty.set(i);
+                blockDataCount++;
+            }
         }
 
         if (skyLight != null) {
@@ -235,26 +241,42 @@ public final class DiskChunkSerializer {
             writeBitSet(buf, notBlockEmpty.toLongArray());
             writeBitSet(buf, skyEmpty.toLongArray());
             writeBitSet(buf, blockEmpty.toLongArray());
-            writeByteArrayList(buf, skyData);
-            writeByteArrayList(buf, blockData);
+
+            VarInt.write(buf, skyDataCount);
+            for (int i = 0; i < count; i++) {
+                byte[] sky = skyLight[i];
+                if (sky != null) {
+                    FriendlyByteBuf.writeByteArray(buf, sky);
+                }
+            }
+
+            VarInt.write(buf, blockDataCount);
+            for (int i = 0; i < count; i++) {
+                byte[] block = blockLight[i];
+                if (block != null) {
+                    FriendlyByteBuf.writeByteArray(buf, block);
+                }
+            }
         } else {
             buf.writeByte(0);
             writeBitSet(buf, notBlockEmpty.toLongArray());
             buf.writeByte(0);
             writeBitSet(buf, blockEmpty.toLongArray());
             buf.writeByte(0);
-            writeByteArrayList(buf, blockData);
+
+            VarInt.write(buf, blockDataCount);
+            for (int i = 0; i < count; i++) {
+                byte[] block = blockLight[i];
+                if (block != null) {
+                    FriendlyByteBuf.writeByteArray(buf, block);
+                }
+            }
         }
     }
 
     private static void writeBitSet(ByteBuf buf, long[] set) {
         VarInt.write(buf, set.length);
         for (long l : set) buf.writeLong(l);
-    }
-
-    private static void writeByteArrayList(ByteBuf buf, List<byte[]> list) {
-        VarInt.write(buf, list.size());
-        for (byte[] arr : list) FriendlyByteBuf.writeByteArray(buf, arr);
     }
 
     /**

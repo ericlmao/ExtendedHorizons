@@ -291,7 +291,17 @@ public final class FakeChunkOrchestratorService {
             base = worldDistance;
         }
 
-        return Math.max(MIN_DISTANCE, Math.min(base, effectiveCap));
+        int target = Math.min(base, effectiveCap);
+        int clientRequestedDistance = -1;
+        try {
+            clientRequestedDistance = player.getClientViewDistance();
+        } catch (LinkageError e) {
+            clientRequestedDistance = player.getViewDistance();
+        }
+        if (clientRequestedDistance > 0) {
+            target = Math.min(target, clientRequestedDistance);
+        }
+        return Math.max(MIN_DISTANCE, target);
     }
 
     private PermissionCacheEntry resolvePermissionSnapshot(Player player) {
