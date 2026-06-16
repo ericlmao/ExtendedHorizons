@@ -6,7 +6,7 @@ plugins {
 }
 
 group = 'me.mapacheee'
-version = '3.1.4-beta3'
+version = '3.1.5'
 description = 'ExtendedHorizons - Advanced view distance extension plugin'
 
 java {
@@ -16,6 +16,19 @@ java {
 repositories {
     mavenCentral()
     mavenLocal()
+    ivy {
+        name = 'mapacheeeLibReleases'
+        url = 'https://github.com/Mapacheee/MapacheeeLib/releases/download'
+        patternLayout {
+            artifact '/v[revision]/[artifact]-[revision].[ext]'
+        }
+        metadataSources {
+            artifact()
+        }
+        content {
+            includeModule 'me.mapacheee', 'MapacheeeLib'
+        }
+    }
     maven {
         name = 'papermc-repo'
         url = 'https://repo.papermc.io/repository/maven-public/'
@@ -51,8 +64,8 @@ dependencies {
     annotationProcessor("me.mapacheee:MapacheeeLib:1.0.0")
     paperweight.paperDevBundle("26.1.2.build.+")
 
-    annotationProcessor("com.thewinterframework:paper:1.0.6")
-    annotationProcessor("com.thewinterframework:configuration:1.0.4")
+    annotationProcessor("com.thewinterframework:paper:1.0.4")
+    annotationProcessor("com.thewinterframework:configuration:1.0.2")
 
     implementation("dev.faststats.metrics:bukkit:0.22.0")
     compileOnly("me.clip:placeholderapi:2.12.2")
@@ -64,6 +77,19 @@ dependencies {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 25
+    options.compilerArgs += [
+        '-processor',
+        [
+            'com.thewinterframework.module.processor.ModuleComponentAnnotationProcessor',
+            'com.thewinterframework.service.processor.ServiceAnnotationProcessor',
+            'com.thewinterframework.paper.listener.processor.ListenerComponentProcessor',
+            'com.thewinterframework.paper.yaml.processor.YamlConfigProcessor',
+            'com.thewinterframework.configurate.serializer.processor.ConfigurateSerializerAnnotationProcessor',
+            'com.thewinterframework.configurate.serializer.processor.ConfigurateSerializerProviderAnnotationProcessor',
+            'com.thewinterframework.configurate.config.ConfigurateAnnotationProcessor',
+            'com.thewinterframework.command.processor.CommandComponentProcessor'
+        ].join(',')
+    ]
 }
 
 shadowJar {

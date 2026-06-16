@@ -1,3 +1,5 @@
+> **Notice:** This is an ultra-performance fork of the original ExtendedHorizons project. Builds of the plugin are available at [https://ci.moonrise.gg/job/ExtendedHorizons/](https://ci.moonrise.gg/job/ExtendedHorizons/).
+
 <div align="center">
   <img width="1080" height="462" alt="eh_main(1)(1)" src="https://i.imgur.com/cJ3108T.png" />
 </div>
@@ -18,10 +20,13 @@ It renders distant terrain using optimized fake chunks and optional far-player s
 ---
 ## How to build
 
-Build this project with this command: 
+Build this project with this command:
 ```cmd
 ./gradlew shadowJar
 ```
+
+On macOS, run the same command from Terminal. The Gradle wrapper uses Java 21 to start Gradle when available, and Gradle will automatically provision the Java 25 toolchain used to compile the plugin.
+
 The artifact will be generated in `build/libs/ExtendedHorizons-{version}.jar` ready to use!
 
 ---

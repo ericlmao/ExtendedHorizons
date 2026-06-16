@@ -20,10 +20,9 @@ import net.minecraft.network.protocol.game.ClientboundStartConfigurationPacket;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.ChunkPos;
 
-import java.util.UUID;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
+import java.util.UUID;
 
 public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
 
@@ -48,7 +47,7 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
         if (msg instanceof ClientboundLevelChunkWithLightPacket) {
             PacketIdRegistry.markPendingLevelChunkProbe(ctx.channel());
         }
-        if (msg instanceof net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket) {
+        if (msg instanceof ClientboundSetChunkCacheRadiusPacket) {
             PacketIdRegistry.markPendingRadiusProbe(ctx.channel());
         }
         PlayerSession trackingSession = this.session;
@@ -218,7 +217,7 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
                 } catch (Throwable ignored) {
                 }
             }
-            default -> {}
+            default -> { }
         }
     }
 

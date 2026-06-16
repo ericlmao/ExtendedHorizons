@@ -3,6 +3,7 @@ package me.mapacheee.extendedhorizons.fakechunks.cache;
 import com.google.inject.Inject;
 import com.thewinterframework.configurate.Container;
 import com.thewinterframework.service.annotation.Service;
+import com.thewinterframework.service.annotation.lifecycle.OnDisable;
 import io.netty.buffer.ByteBuf;
 import io.netty.util.ReferenceCountUtil;
 import me.mapacheee.extendedhorizons.config.EhConfig;
@@ -31,12 +32,15 @@ public final class LightPayloadCacheService {
     public void rebuild() {
         int ttlSeconds = Math.max(1, this.configContainer.get().cacheTtlSeconds());
         int maxEntries = Math.max(MIN_CACHE_ENTRIES, this.configContainer.get().cacheMaxEntries() / MAX_ENTRIES_DIVISOR);
+        Cache<LightChunkKey, ByteBuf> oldCache = this.cache;
 
         this.cache = Caffeine.newBuilder()
             .maximumSize(maxEntries)
             .expireAfterWrite(Duration.ofSeconds(ttlSeconds))
             .removalListener((LightChunkKey key, ByteBuf value, RemovalCause cause) -> ReferenceCountUtil.release(value))
             .build();
+
+        drainCache(oldCache);
     }
 
     public ByteBuf get(UUID worldId, long chunkKey) {
@@ -70,8 +74,21 @@ public final class LightPayloadCacheService {
 
     public void invalidateAll() {
         this.cache.invalidateAll();
+        this.cache.cleanUp();
+    }
+
+    @OnDisable
+    public void onDisable() {
+        this.invalidateAll();
     }
 
     private record LightChunkKey(UUID worldId, long chunkKey) {}
-}
 
+    private static void drainCache(Cache<?, ?> cache) {
+        if (cache == null) {
+            return;
+        }
+        cache.invalidateAll();
+        cache.cleanUp();
+    }
+}

@@ -60,6 +60,7 @@ public class EhCommands {
     }
 
     @Command("eh reload")
+    @Command("extendedhorizons reload")
     @Permission("extendedhorizons.reload")
     public void reloadCommand(Source source) {
         this.reloadServiceManager.reload();
@@ -76,6 +77,7 @@ public class EhCommands {
     }
 
     @Command("eh setme <distance>")
+    @Command("extendedhorizons setme <distance>")
     @Permission("extendedhorizons.setme")
     public void setMeCommand(Source source, @Argument("distance") int distance) {
         if (!(source.source() instanceof Player sender)) {
@@ -88,6 +90,7 @@ public class EhCommands {
     }
 
     @Command("eh set <player> <distance>")
+    @Command("extendedhorizons set <player> <distance>")
     @Permission("extendedhorizons.set")
     public void setPlayerCommand(
         Source source,
@@ -106,6 +109,7 @@ public class EhCommands {
     }
 
     @Command("eh reset [player]")
+    @Command("extendedhorizons reset [player]")
     @Permission("extendedhorizons.reset")
     public void resetCommand(
         Source source,

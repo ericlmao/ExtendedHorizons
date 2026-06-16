@@ -4,6 +4,7 @@ import com.google.inject.Inject;
 import com.mojang.datafixers.util.Pair;
 import com.thewinterframework.configurate.Container;
 import com.thewinterframework.service.annotation.Service;
+import com.thewinterframework.service.annotation.lifecycle.OnDisable;
 import me.mapacheee.extendedhorizons.config.EhConfig;
 import me.mapacheee.extendedhorizons.fakechunks.farplayers.model.FarPlayerState;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
@@ -46,6 +47,8 @@ public final class FarPlayerCacheService {
     public void rebuild() {
         int maxEntries = this.configContainer.get().farPlayerCacheEntries();
         Duration ttl = Duration.ofSeconds(DEFAULT_TTL_SECONDS);
+        Cache<UUID, FarPlayerState> oldStatesCache = this.statesCache;
+        Cache<UUID, List<Pair<EquipmentSlot, ItemStack>>> oldEquipmentCache = this.equipmentCache;
         this.statesCache = Caffeine.newBuilder()
             .maximumSize(maxEntries)
             .expireAfterWrite(ttl)
@@ -54,6 +57,11 @@ public final class FarPlayerCacheService {
             .maximumSize(maxEntries)
             .expireAfterWrite(ttl)
             .build();
+        drainCache(oldStatesCache);
+        drainCache(oldEquipmentCache);
+        this.spatialIndex.clear();
+        this.playerLastRegion.clear();
+        this.playerLastWorld.clear();
     }
 
     private long getRegionKey(int chunkX, int chunkZ) {
@@ -153,5 +161,22 @@ public final class FarPlayerCacheService {
             }
         }
         return nearby;
+    }
+
+    @OnDisable
+    public void onDisable() {
+        drainCache(this.statesCache);
+        drainCache(this.equipmentCache);
+        this.spatialIndex.clear();
+        this.playerLastRegion.clear();
+        this.playerLastWorld.clear();
+    }
+
+    private static void drainCache(Cache<?, ?> cache) {
+        if (cache == null) {
+            return;
+        }
+        cache.invalidateAll();
+        cache.cleanUp();
     }
 }
