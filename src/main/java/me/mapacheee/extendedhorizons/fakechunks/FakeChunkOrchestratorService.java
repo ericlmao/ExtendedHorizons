@@ -14,7 +14,6 @@ import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
 import me.mapacheee.extendedhorizons.fakechunks.session.SessionRegistry;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
@@ -105,7 +104,7 @@ public final class FakeChunkOrchestratorService {
         Location loc = player.getLocation();
         int chunkX = loc.getBlockX() >> 4;
         int chunkZ = loc.getBlockZ() >> 4;
-        int targetDistance = this.resolveClientDistance(player, worldName);
+        int targetDistance = this.resolveClientDistance(player, session, worldName);
         int serverDistance = this.resolveServerDistance(player);
 
         boolean chunkChanged = session.hasChunkChanged(chunkX, chunkZ);
@@ -125,12 +124,13 @@ public final class FakeChunkOrchestratorService {
             return;
         }
 
-        Collection<FarPlayerState> visibleCandidates = Collections.emptyList();
-        if (this.configContainer.get().farPlayersEnabled()) {
+        Collection<FarPlayerState> visibleCandidates = null;
+        boolean shouldUpdateFarPlayers = farPlayersEnabled && (chunkChanged || distanceChanged || !session.initiated() || isFarPlayerTick);
+        if (shouldUpdateFarPlayers) {
             Collection<FarPlayerState> candidates = this.farPlayerCacheService.getNearbyPlayers(
                 world.getUID(), chunkX, chunkZ, targetDistance
             );
-            List<FarPlayerState> visible = new ArrayList<>();
+            List<FarPlayerState> visible = new ArrayList<>(candidates.size());
             for (FarPlayerState state : candidates) {
                 if (state.uuid().equals(player.getUniqueId())) {
                     continue;
@@ -189,7 +189,7 @@ public final class FakeChunkOrchestratorService {
         this.syncClientCenter(channel, session, snapshot.chunkX(), snapshot.chunkZ());
         this.syncClientRadius(channel, session, snapshot.targetDistance());
 
-        if (this.configContainer.get().farPlayersEnabled()) {
+        if (this.configContainer.get().farPlayersEnabled() && snapshot.visibleCandidates() != null) {
             this.farPlayerTrackingService.track(
                 snapshot.viewerId(),
                 ChunkKeyCodec.pack(snapshot.chunkX(), snapshot.chunkZ()),
@@ -198,7 +198,7 @@ public final class FakeChunkOrchestratorService {
                 snapshot.targetDistance(),
                 snapshot.visibleCandidates()
             );
-        } else {
+        } else if (!this.configContainer.get().farPlayersEnabled()) {
             this.farPlayerTrackingService.clearTracked(channel, session);
         }
 
@@ -262,13 +262,13 @@ public final class FakeChunkOrchestratorService {
         return globalDistance;
     }
 
-    private int resolveClientDistance(Player player, String worldName) {
+    private int resolveClientDistance(Player player, PlayerSession session, String worldName) {
         if (worldName == null) {
             return DEFAULT_VIEW_DISTANCE;
         }
 
         int worldDistance = this.configContainer.get().targetViewDistance(worldName);
-        PermissionCacheEntry permissionSnapshot = this.resolvePermissionSnapshot(player);
+        PermissionCacheEntry permissionSnapshot = this.resolvePermissionSnapshot(player, session);
         int permissionCap = permissionSnapshot.permissionCap();
         boolean hasBypass = permissionSnapshot.hasBypass();
 
@@ -283,7 +283,6 @@ public final class FakeChunkOrchestratorService {
             effectiveCap = worldDistance;
         }
 
-        PlayerSession session = this.sessionRegistry.get(player.getUniqueId());
         int base;
         if (session != null && session.playerOverrideDistance() > 0) {
             base = session.playerOverrideDistance();
@@ -304,17 +303,26 @@ public final class FakeChunkOrchestratorService {
         return Math.max(MIN_DISTANCE, target);
     }
 
-    private PermissionCacheEntry resolvePermissionSnapshot(Player player) {
-        UUID playerId = player.getUniqueId();
-        PermissionCacheEntry cached = this.permissionCache.getIfPresent(playerId);
-        if (cached != null) {
-            return cached;
+    private PermissionCacheEntry resolvePermissionSnapshot(Player player, PlayerSession session) {
+        long now = System.nanoTime();
+        int cachedCap = session.cachedPermissionCap();
+        if (cachedCap != -2 && now < session.permissionCacheExpiryNanos()) {
+            return new PermissionCacheEntry(cachedCap, session.cachedHasBypass());
         }
 
         int permissionCap = resolvePermissionCap(player);
         boolean hasBypass = player.hasPermission(PERMISSION_BYPASS);
+
+        session.cachedPermissionCap(permissionCap);
+        session.cachedHasBypass(hasBypass);
+        int ttlSeconds = this.configContainer.get().permissionCacheTtlSeconds();
+        long ttlNanos = ttlSeconds > 0 ? Duration.ofSeconds(ttlSeconds).toNanos() : DEFAULT_PERMISSION_TTL.toNanos();
+        session.permissionCacheExpiryNanos(now + ttlNanos);
+
+        UUID playerId = player.getUniqueId();
         PermissionCacheEntry updated = new PermissionCacheEntry(permissionCap, hasBypass);
         this.permissionCache.put(playerId, updated);
+
         return updated;
     }
 
@@ -333,10 +341,15 @@ public final class FakeChunkOrchestratorService {
             return;
         }
         this.permissionCache.invalidate(playerId);
+        PlayerSession session = this.sessionRegistry.get(playerId);
+        if (session != null) {
+            session.cachedPermissionCap(-2);
+        }
     }
 
     public void invalidateAllPermissionCache() {
         this.permissionCache.invalidateAll();
+        this.sessionRegistry.forEachSession(session -> session.cachedPermissionCap(-2));
     }
 
     private void clearSessionState(@Nullable Channel channel, @Nullable PlayerSession session) {
