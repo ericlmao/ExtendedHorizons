@@ -114,6 +114,15 @@ case "$( uname )" in                #(
   NONSTOP* )        nonstop=true ;;
 esac
 
+if "$darwin" && [ -z "$JAVA_HOME" ] && command -v /usr/libexec/java_home >/dev/null 2>&1; then
+    macos_java_home=$(/usr/libexec/java_home -v 21 2>/dev/null)
+    if [ -n "$macos_java_home" ]; then
+        JAVA_HOME=$macos_java_home
+        export JAVA_HOME
+    fi
+fi
+
+CLASSPATH="\\\"\\\""
 
 
 # Determine the Java command to use to start the JVM.

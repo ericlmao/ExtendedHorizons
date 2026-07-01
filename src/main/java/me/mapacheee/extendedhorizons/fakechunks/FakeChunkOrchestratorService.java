@@ -124,24 +124,23 @@ public final class FakeChunkOrchestratorService {
             return;
         }
 
-        List<FarPlayerState> visibleCandidates = null;
+        Collection<FarPlayerState> visibleCandidates = null;
         boolean shouldUpdateFarPlayers = farPlayersEnabled && (chunkChanged || distanceChanged || !session.initiated() || isFarPlayerTick);
         if (shouldUpdateFarPlayers) {
             Collection<FarPlayerState> candidates = this.farPlayerCacheService.getNearbyPlayers(
                 world.getUID(), chunkX, chunkZ, targetDistance
             );
-            if (!candidates.isEmpty()) {
-                visibleCandidates = new ArrayList<>(candidates.size());
-                for (FarPlayerState state : candidates) {
-                    if (state.uuid().equals(player.getUniqueId())) {
-                        continue;
-                    }
-                    Player target = Bukkit.getPlayer(state.uuid());
-                    if (target != null && target.isOnline() && player.canSee(target)) {
-                        visibleCandidates.add(state);
-                    }
+            List<FarPlayerState> visible = new ArrayList<>(candidates.size());
+            for (FarPlayerState state : candidates) {
+                if (state.uuid().equals(player.getUniqueId())) {
+                    continue;
+                }
+                Player target = Bukkit.getPlayer(state.uuid());
+                if (target != null && target.isOnline() && player.canSee(target)) {
+                    visible.add(state);
                 }
             }
+            visibleCandidates = visible;
         }
 
         TickSnapshot snapshot = new TickSnapshot(
@@ -387,4 +386,3 @@ public final class FakeChunkOrchestratorService {
 
     private record PermissionCacheEntry(int permissionCap, boolean hasBypass) {}
 }
-

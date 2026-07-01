@@ -1,6 +1,7 @@
 package me.mapacheee.extendedhorizons.fakechunks.session;
 
 import com.thewinterframework.service.annotation.Service;
+import com.thewinterframework.service.annotation.lifecycle.OnDisable;
 import org.bukkit.entity.Player;
 
 import java.util.Map;
@@ -47,5 +48,10 @@ public final class SessionRegistry {
             removed.clearDispatchState();
         }
     }
-}
 
+    @OnDisable
+    public void onDisable() {
+        this.sessions.values().forEach(PlayerSession::clearDispatchState);
+        this.sessions.clear();
+    }
+}
