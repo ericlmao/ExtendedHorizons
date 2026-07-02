@@ -5,7 +5,6 @@ import me.mapacheee.extendedhorizons.fakechunks.planner.ChunkPlannerService;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
@@ -462,6 +461,10 @@ public final class PlayerSession {
             return wasLoaded;
         }
         return false;
+    }
+
+    public boolean isEhLoaded(long chunkKey) {
+        return this.getStateByKey(chunkKey).lifecycle() == ChunkLifecycle.EH_LOADED;
     }
 
     public long[] loadedBvChunkKeys() {
