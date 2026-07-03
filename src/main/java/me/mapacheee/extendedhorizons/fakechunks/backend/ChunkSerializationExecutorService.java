@@ -52,6 +52,7 @@ public final class ChunkSerializationExecutorService {
         if (workers <= 0) {
             return;
         }
+        this.shutdown = false;
         this.executor = Executors.newFixedThreadPool(workers, new SerializerThreadFactory());
     }
 
@@ -81,5 +82,4 @@ public final class ChunkSerializationExecutorService {
         }
     }
 }
-
 

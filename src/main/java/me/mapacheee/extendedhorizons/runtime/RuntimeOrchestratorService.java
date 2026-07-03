@@ -177,6 +177,7 @@ public final class RuntimeOrchestratorService {
             this.chunkBuildCacheService.cleanUp();
             this.lightPayloadCacheService.cleanUp();
             this.antiXrayPayloadCacheService.cleanUp();
+            this.farPlayerCacheService.cleanUp();
         }
 
         if (config.debugEnabled() && Math.floorMod(this.orchestratorTick, 200) == 0) {

@@ -44,6 +44,20 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
 
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+        if (msg instanceof EhBypassPacket bypass) {
+            Object payload = bypass.payload();
+            if (payload == null) {
+                promise.tryFailure(new NullPointerException("Bypass packet payload is null"));
+                return;
+            }
+            try {
+                super.write(ctx, payload, promise);
+            } catch (Throwable throwable) {
+                ReferenceCountUtil.release(payload);
+                throw throwable;
+            }
+            return;
+        }
         if (msg instanceof ClientboundLevelChunkWithLightPacket) {
             PacketIdRegistry.markPendingLevelChunkProbe(ctx.channel());
         }
@@ -79,13 +93,6 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
                     promise.setSuccess();
                     return;
                 }
-            }
-        }
-        if (msg instanceof EhBypassPacket bypass) {
-            Object payload = bypass.payload();
-            if (!(payload instanceof ByteBuf)) {
-                super.write(ctx, payload, promise);
-                return;
             }
         }
         super.write(ctx, msg, promise);
