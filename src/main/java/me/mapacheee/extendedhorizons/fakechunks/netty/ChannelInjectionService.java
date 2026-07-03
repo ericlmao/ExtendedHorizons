@@ -1,5 +1,6 @@
 package me.mapacheee.extendedhorizons.fakechunks.netty;
 
+import com.thewinterframework.service.annotation.lifecycle.OnDisable;
 import com.thewinterframework.service.annotation.Service;
 import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
@@ -7,14 +8,20 @@ import io.netty.channel.ChannelPromise;
 import io.netty.util.ReferenceCountUtil;
 import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
 import net.minecraft.server.level.ServerPlayer;
+import org.bukkit.Bukkit;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
+
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public final class ChannelInjectionService {
 
     public static final String EH_HANDLER = "eh_packet_handler";
     public static final String EH_PACKET_ID_PROBE_HANDLER = "eh_packet_id_probe";
+    private final Set<Channel> injectedChannels = ConcurrentHashMap.newKeySet();
 
     public void inject(Player player) {
         this.inject(player, null);
@@ -33,6 +40,7 @@ public final class ChannelInjectionService {
             }
             if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
                 handler.setSession(session);
+                this.trackInjectedChannel(channel);
                 removePacketIdProbeIfResolved(channel);
                 return;
             }
@@ -42,6 +50,7 @@ public final class ChannelInjectionService {
             EhPacketHandler handler = new EhPacketHandler();
             handler.setSession(session);
             channel.pipeline().addBefore("packet_handler", EH_HANDLER, handler);
+            this.trackInjectedChannel(channel);
             PacketIdRegistry.resolveFromEncoder(channel);
             removePacketIdProbeIfResolved(channel);
         };
@@ -49,10 +58,14 @@ public final class ChannelInjectionService {
     }
 
     public void uninject(Player player) {
-        Channel channel = this.resolveChannel(player);
-        if (channel == null || !channel.isActive()) {
+        this.uninject(this.resolveChannel(player));
+    }
+
+    private void uninject(Channel channel) {
+        if (channel == null) {
             return;
         }
+        this.injectedChannels.remove(channel);
         Runnable action = () -> {
             if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
                 handler.setSession(null);
@@ -84,6 +97,7 @@ public final class ChannelInjectionService {
 
     public boolean writeBypass(Channel channel, Object payload) {
         if (channel == null || !channel.isActive()) {
+            ReferenceCountUtil.release(payload);
             return false;
         }
         Runnable action = () -> {
@@ -91,9 +105,16 @@ public final class ChannelInjectionService {
                 ReferenceCountUtil.release(payload);
                 return;
             }
-            channel.write(new EhBypassPacket(payload), channel.voidPromise());
+            try {
+                channel.write(new EhBypassPacket(payload), channel.voidPromise());
+            } catch (Throwable throwable) {
+                ReferenceCountUtil.release(payload);
+            }
         };
-        this.runOnEventLoop(channel, action);
+        if (!this.runOnEventLoop(channel, action)) {
+            ReferenceCountUtil.release(payload);
+            return false;
+        }
         return true;
     }
 
@@ -108,9 +129,17 @@ public final class ChannelInjectionService {
                 promise.tryFailure(new IllegalStateException("Channel inactive"));
                 return;
             }
-            channel.write(new EhBypassPacket(payload), promise);
+            try {
+                channel.write(new EhBypassPacket(payload), promise);
+            } catch (Throwable throwable) {
+                ReferenceCountUtil.release(payload);
+                promise.tryFailure(throwable);
+            }
         };
-        this.runOnEventLoop(channel, action);
+        if (!this.runOnEventLoop(channel, action)) {
+            ReferenceCountUtil.release(payload);
+            promise.tryFailure(new IllegalStateException("Channel event loop unavailable"));
+        }
         return promise;
     }
 
@@ -144,13 +173,42 @@ public final class ChannelInjectionService {
         return serverPlayer.connection.connection.channel;
     }
 
-    private void runOnEventLoop(Channel channel, Runnable action) {
+    @OnDisable
+    public void onDisable() {
+        Set<Channel> channels = new HashSet<>(this.injectedChannels);
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            Channel channel = this.resolveChannel(player);
+            if (channel != null) {
+                channels.add(channel);
+            }
+        }
+        for (Channel channel : channels) {
+            this.uninject(channel);
+        }
+        this.injectedChannels.clear();
+    }
+
+    private boolean runOnEventLoop(Channel channel, Runnable action) {
+        if (channel == null || action == null) {
+            return false;
+        }
         EventLoop eventLoop = channel.eventLoop();
         if (eventLoop.inEventLoop()) {
             action.run();
-            return;
+            return true;
         }
-        eventLoop.execute(action);
+        try {
+            eventLoop.execute(action);
+            return true;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private void trackInjectedChannel(Channel channel) {
+        if (this.injectedChannels.add(channel)) {
+            channel.closeFuture().addListener(future -> this.injectedChannels.remove(channel));
+        }
     }
 
     private static boolean needsPacketIdProbe() {

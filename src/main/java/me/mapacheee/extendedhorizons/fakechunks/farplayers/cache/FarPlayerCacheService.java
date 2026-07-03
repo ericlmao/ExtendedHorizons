@@ -10,6 +10,7 @@ import me.mapacheee.extendedhorizons.fakechunks.farplayers.model.FarPlayerState;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 import me.mapacheee.lib.caffeine.cache.Cache;
 import me.mapacheee.lib.caffeine.cache.Caffeine;
+import me.mapacheee.lib.caffeine.cache.RemovalCause;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 
@@ -52,6 +53,11 @@ public final class FarPlayerCacheService {
         this.statesCache = Caffeine.newBuilder()
             .maximumSize(maxEntries)
             .expireAfterWrite(ttl)
+            .removalListener((UUID playerId, FarPlayerState state, RemovalCause cause) -> {
+                if (cause != RemovalCause.REPLACED) {
+                    this.removeFromSpatialIndex(playerId, this.playerLastWorld.remove(playerId), this.playerLastRegion.remove(playerId));
+                }
+            })
             .build();
         this.equipmentCache = Caffeine.newBuilder()
             .maximumSize(maxEntries)
@@ -128,6 +134,11 @@ public final class FarPlayerCacheService {
         UUID worldId = this.playerLastWorld.remove(playerId);
         Long regionKey = this.playerLastRegion.remove(playerId);
         removeFromSpatialIndex(playerId, worldId, regionKey);
+    }
+
+    public void cleanUp() {
+        this.statesCache.cleanUp();
+        this.equipmentCache.cleanUp();
     }
 
     public Collection<FarPlayerState> getNearbyPlayers(UUID worldId, int chunkX, int chunkZ, int radiusChunks) {

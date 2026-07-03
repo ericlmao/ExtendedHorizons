@@ -214,6 +214,10 @@ public final class RegionFileReader {
      */
     public static void clearCache() {
         CHANNEL_CACHE.invalidateAll();
+        CHANNEL_CACHE.cleanUp();
+        LOCATION_BUF.remove();
+        CHUNK_HEADER_BUF.remove();
+        DECOMPRESSION_BUF.remove();
     }
 
     /**
