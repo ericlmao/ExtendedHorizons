@@ -6,12 +6,10 @@ import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 
 import java.util.ArrayList;
 import java.util.Deque;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,6 +22,11 @@ public final class PlayerSession {
     private static final double DIRECTION_WEIGHT = 0.3d;
     private static final long FAST_MOVEMENT_NANOS = 400_000_000L;
     private static final long BUILD_FAILED_RETRY_NANOS = 1_000_000_000L;
+    private static final int STORAGE_RADIUS_PADDING = 3;
+    private static final int UNSET_COORD = 0;
+    private static final int PERMISSION_CAP_UNINITIALIZED = -2;
+    private static final int OVERRIDE_DISTANCE_UNSET = -1;
+
     private final UUID playerId;
     private volatile UUID worldId;
     private final AtomicLong epoch = new AtomicLong(0L);
@@ -37,10 +40,10 @@ public final class PlayerSession {
     private volatile boolean initiated;
     private volatile long[] chunksInDistance = EMPTY_LONG_ARRAY;
     private volatile ChunkState[] chunkStates = new ChunkState[0];
-    private volatile int lastAdvertisedDistance = -1;
+    private volatile int lastAdvertisedDistance = OVERRIDE_DISTANCE_UNSET;
     private volatile long lastAdvertisedChunkKey = ChunkKeyCodec.pack(Integer.MIN_VALUE, Integer.MIN_VALUE);
     private volatile int serverViewDistance = 2;
-    private volatile int playerOverrideDistance = -1;
+    private volatile int playerOverrideDistance = OVERRIDE_DISTANCE_UNSET;
     private volatile boolean bandwidthLimiterEnabled;
     private volatile long bandwidthBytesPerSecond;
     private volatile long bandwidthCapacityBytes;
@@ -48,15 +51,15 @@ public final class PlayerSession {
     private volatile long bandwidthLastRefillNanos;
     private final Deque<ChunkSendQueueEntry> chunkQueue = new ConcurrentLinkedDeque<>();
     private final Map<UUID, Integer> trackedFarPlayers = new ConcurrentHashMap<>();
-    private final Set<UUID> trackingBuffer = new HashSet<>();
-    private final Set<Integer> usedFarEntityIdBuffer = new HashSet<>();
+    private final Set<UUID> trackingBuffer = ConcurrentHashMap.newKeySet();
+    private final Set<Integer> usedFarEntityIdBuffer = ConcurrentHashMap.newKeySet();
     private final Set<Integer> serverTrackedEntityIds = ConcurrentHashMap.newKeySet();
     private volatile double moveDirX;
     private volatile double moveDirZ;
     private volatile boolean hasMovementDirection;
     private volatile long lastChunkCrossNanos;
     private final List<Long> pendingUnloads = new ArrayList<>();
-    private volatile int cachedPermissionCap = -2;
+    private volatile int cachedPermissionCap = PERMISSION_CAP_UNINITIALIZED;
     private volatile boolean cachedHasBypass;
     private volatile long permissionCacheExpiryNanos;
 
@@ -166,7 +169,7 @@ public final class PlayerSession {
     }
 
     public void resetPlayerOverrideDistance() {
-        this.playerOverrideDistance = -1;
+        this.playerOverrideDistance = OVERRIDE_DISTANCE_UNSET;
     }
 
     public void setWorld(UUID worldId) {
@@ -244,7 +247,7 @@ public final class PlayerSession {
 
     public void updateDistance(int newDistance) {
         this.distance = Math.max(2, newDistance);
-        this.storageRadius = Math.max(2, this.distance) + 3;
+        this.storageRadius = Math.max(2, this.distance) + STORAGE_RADIUS_PADDING;
         this.storageDiameter = this.storageRadius * 2 + 1;
         this.chunksInDistance = ChunkPlannerService.radiusIterationList(this.distance);
         this.iterationIndex = 0;
@@ -514,7 +517,7 @@ public final class PlayerSession {
         this.resetBandwidthLimiter();
         this.enabled = false;
         this.iterationIndex = 0;
-        this.lastAdvertisedDistance = -1;
+        this.lastAdvertisedDistance = OVERRIDE_DISTANCE_UNSET;
         this.lastAdvertisedChunkKey = ChunkKeyCodec.pack(Integer.MIN_VALUE, Integer.MIN_VALUE);
     }
 
@@ -524,7 +527,7 @@ public final class PlayerSession {
         this.usedFarEntityIdBuffer.clear();
         this.serverTrackedEntityIds.clear();
         this.resetBandwidthLimiter();
-        this.lastAdvertisedDistance = -1;
+        this.lastAdvertisedDistance = OVERRIDE_DISTANCE_UNSET;
         this.lastAdvertisedChunkKey = ChunkKeyCodec.pack(Integer.MIN_VALUE, Integer.MIN_VALUE);
         this.enabled = false;
         this.initiated = false;
@@ -551,14 +554,10 @@ public final class PlayerSession {
         double dirX = this.moveDirX;
         double dirZ = this.moveDirZ;
 
-        Integer[] indices = new Integer[len];
-        for (int i = 0; i < len; i++) {
-            indices[i] = i;
-        }
-
-        // Precompute sorting keys to avoid math overhead and boxing during sort operations (O(N log N) -> O(N))
+        int[] indices = new int[len];
         double[] keys = new double[len];
         for (int i = 0; i < len; i++) {
+            indices[i] = i;
             int ox = ChunkKeyCodec.x(base[i]);
             int oz = ChunkKeyCodec.z(base[i]);
             double dist = Math.sqrt(ox * ox + oz * oz);
@@ -570,7 +569,16 @@ public final class PlayerSession {
             }
         }
 
-        Arrays.sort(indices, (i1, i2) -> Double.compare(keys[i1], keys[i2]));
+        for (int i = 1; i < len; i++) {
+            int current = indices[i];
+            double currentKey = keys[current];
+            int j = i - 1;
+            while (j >= 0 && keys[indices[j]] > currentKey) {
+                indices[j + 1] = indices[j];
+                j--;
+            }
+            indices[j + 1] = current;
+        }
 
         long[] sorted = new long[len];
         for (int i = 0; i < len; i++) {
@@ -698,12 +706,12 @@ public final class PlayerSession {
         }
 
         public void reset() {
-            this.set(0, 0, ChunkLifecycle.UNLOADED);
+            this.set(UNSET_COORD, UNSET_COORD, ChunkLifecycle.UNLOADED);
             this.failedAtNanos = 0L;
         }
 
         public boolean hasCoords() {
-            return this.lifecycle != ChunkLifecycle.UNLOADED || this.chunkX != 0 || this.chunkZ != 0;
+            return this.lifecycle != ChunkLifecycle.UNLOADED || this.chunkX != UNSET_COORD || this.chunkZ != UNSET_COORD;
         }
     }
 }

@@ -11,6 +11,7 @@ import me.mapacheee.extendedhorizons.fakechunks.farplayers.FarPlayerTrackingServ
 import me.mapacheee.extendedhorizons.fakechunks.farplayers.cache.FarPlayerCacheService;
 import me.mapacheee.extendedhorizons.fakechunks.farplayers.model.FarPlayerState;
 import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
+import me.mapacheee.extendedhorizons.fakechunks.netty.PacketIdRegistry;
 import me.mapacheee.extendedhorizons.fakechunks.session.SessionRegistry;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -41,6 +42,9 @@ public final class FakeChunkOrchestratorService {
     private static final int DEFAULT_VIEW_DISTANCE = 10;
     private static final String PERMISSION_BYPASS = "extendedhorizons.bypass";
     private static final String PERMISSION_PREFIX = "extendedhorizons.max.";
+    private static final int PERMISSION_CAP_UNINITIALIZED = -2;
+    private static final int PERMISSION_CAP_NONE = -1;
+    private static final int CLIENT_DISTANCE_UNSET = -1;
 
     private final Container<EhConfig> configContainer;
     private static final Logger LOGGER = LoggerFactory.getLogger(FakeChunkOrchestratorService.class);
@@ -202,6 +206,13 @@ public final class FakeChunkOrchestratorService {
             this.farPlayerTrackingService.clearTracked(channel, session);
         }
 
+        if (!PacketIdRegistry.hasLevelChunkWithLightId()) {
+            PacketIdRegistry.resolveFromEncoder(channel);
+            if (!PacketIdRegistry.hasLevelChunkWithLightId()) {
+                this.channelInjectionService.flush(channel);
+                return;
+            }
+        }
         this.dispatchService.processQueue(snapshot.world(), channel, session);
         this.channelInjectionService.flush(channel);
     }
@@ -291,7 +302,7 @@ public final class FakeChunkOrchestratorService {
         }
 
         int target = Math.min(base, effectiveCap);
-        int clientRequestedDistance = -1;
+        int clientRequestedDistance = CLIENT_DISTANCE_UNSET;
         try {
             clientRequestedDistance = player.getClientViewDistance();
         } catch (LinkageError e) {
@@ -306,7 +317,7 @@ public final class FakeChunkOrchestratorService {
     private PermissionCacheEntry resolvePermissionSnapshot(Player player, PlayerSession session) {
         long now = System.nanoTime();
         int cachedCap = session.cachedPermissionCap();
-        if (cachedCap != -2 && now < session.permissionCacheExpiryNanos()) {
+        if (cachedCap != PERMISSION_CAP_UNINITIALIZED && now < session.permissionCacheExpiryNanos()) {
             return new PermissionCacheEntry(cachedCap, session.cachedHasBypass());
         }
 
@@ -326,14 +337,22 @@ public final class FakeChunkOrchestratorService {
         return updated;
     }
 
+    private static final int MAX_PERMISSION_CAP = 100;
+    private static final String[] PERMISSION_STRINGS = new String[MAX_PERMISSION_CAP + 1];
+
+    static {
+        for (int i = 1; i <= MAX_PERMISSION_CAP; i++) {
+            PERMISSION_STRINGS[i] = PERMISSION_PREFIX + i;
+        }
+    }
+
     private static int resolvePermissionCap(Player player) {
-        int maxFound = -1;
-        for (int i = 100; i >= 1; i--) {
-            if (player.hasPermission(PERMISSION_PREFIX + i)) {
+        for (int i = MAX_PERMISSION_CAP; i >= 1; i--) {
+            if (player.hasPermission(PERMISSION_STRINGS[i])) {
                 return i;
             }
         }
-        return maxFound;
+        return PERMISSION_CAP_NONE;
     }
 
     public void invalidatePermissionCache(UUID playerId) {
@@ -343,13 +362,13 @@ public final class FakeChunkOrchestratorService {
         this.permissionCache.invalidate(playerId);
         PlayerSession session = this.sessionRegistry.get(playerId);
         if (session != null) {
-            session.cachedPermissionCap(-2);
+            session.cachedPermissionCap(PERMISSION_CAP_UNINITIALIZED);
         }
     }
 
     public void invalidateAllPermissionCache() {
         this.permissionCache.invalidateAll();
-        this.sessionRegistry.forEachSession(session -> session.cachedPermissionCap(-2));
+        this.sessionRegistry.forEachSession(session -> session.cachedPermissionCap(PERMISSION_CAP_UNINITIALIZED));
     }
 
     private void clearSessionState(@Nullable Channel channel, @Nullable PlayerSession session) {
@@ -364,6 +383,7 @@ public final class FakeChunkOrchestratorService {
         }
         session.unloadEhChunks();
         session.clearDispatchState();
+        this.channelInjectionService.flush(channel);
     }
 
     private void unloadSessionChunks(Channel channel, PlayerSession session) {

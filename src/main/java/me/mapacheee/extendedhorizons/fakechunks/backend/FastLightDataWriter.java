@@ -9,6 +9,7 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
 
@@ -16,6 +17,13 @@ final class FastLightDataWriter {
 
     private static final int NO_SKY_HEADER_BYTES = 3;
     private static final int DEFAULT_SECTION_COUNT = 16;
+    private static final int EXTRA_LIGHT_SECTIONS = 2;
+    private static final int FULL_BRIGHT_ARRAY_BYTES = 2048;
+    private static final byte[] FULL_BRIGHT;
+    static {
+        FULL_BRIGHT = new byte[FULL_BRIGHT_ARRAY_BYTES];
+        Arrays.fill(FULL_BRIGHT, (byte) 0xFF);
+    }
 
     private static final MethodHandle GET_STORAGE_VISIBLE = createStorageVisibleHandle();
 
@@ -72,10 +80,7 @@ final class FastLightDataWriter {
     static void writeSyntheticFullBrightLight(FriendlyByteBuf out, LevelChunk chunk) {
         SWMRNibbleArray[] blockNibbles = chunk.starlight$getBlockNibbles();
         boolean hasSky = chunk.starlight$getSkyNibbles() != null;
-        int sectionCount = blockNibbles != null ? blockNibbles.length : chunk.getSectionsCount() + 2;
-
-        byte[] fullBright = new byte[2048];
-        java.util.Arrays.fill(fullBright, (byte) 0xFF);
+        int sectionCount = blockNibbles != null ? blockNibbles.length : chunk.getSectionsCount() + EXTRA_LIGHT_SECTIONS;
 
         if (hasSky) {
             BitSet notSkyEmpty = new BitSet(sectionCount);
@@ -92,7 +97,7 @@ final class FastLightDataWriter {
 
             VarIntUtil.writeVarInt(out, sectionCount);
             for (int i = 0; i < sectionCount; i++) {
-                FriendlyByteBuf.writeByteArray(out, fullBright);
+                FriendlyByteBuf.writeByteArray(out, FULL_BRIGHT);
             }
             out.writeByte(0);
         } else {
@@ -111,7 +116,7 @@ final class FastLightDataWriter {
             out.writeByte(0);
             VarIntUtil.writeVarInt(out, sectionCount);
             for (int i = 0; i < sectionCount; i++) {
-                FriendlyByteBuf.writeByteArray(out, fullBright);
+                FriendlyByteBuf.writeByteArray(out, FULL_BRIGHT);
             }
         }
     }
