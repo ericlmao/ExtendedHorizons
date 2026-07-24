@@ -32,7 +32,10 @@ import com.mojang.datafixers.util.Pair;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 @Service
 public final class RuntimeOrchestratorService {
@@ -41,6 +44,9 @@ public final class RuntimeOrchestratorService {
     private static final EquipmentSlot[] EQUIPMENT_SLOTS = EquipmentSlot.values();
     private static final int EQUIPMENT_SLOT_COUNT = EQUIPMENT_SLOTS.length;
     private static final int CACHE_CLEANUP_INTERVAL = 200;
+    private static final int DEBUG_METRICS_LOG_INTERVAL = 200;
+    private static final double CACHE_HIT_RATE_SCALE = 10_000.0d;
+    private static final double PERCENTAGE_DIVISOR = 100.0d;
 
     private final Container<EhConfig> configContainer;
     private final SessionRegistry sessionRegistry;
@@ -51,6 +57,9 @@ public final class RuntimeOrchestratorService {
     private final ChunkBuildCacheService chunkBuildCacheService;
     private final LightPayloadCacheService lightPayloadCacheService;
     private final AntiXrayPayloadCacheService antiXrayPayloadCacheService;
+
+    private final Map<UUID, List<Pair<EquipmentSlot, ItemStack>>> lastEquipment = new HashMap<>();
+    private final List<Player> playerBuffer = new ArrayList<>();
 
     private volatile ScheduledTask runtimeTask;
     private int orchestratorTick;
@@ -99,11 +108,12 @@ public final class RuntimeOrchestratorService {
         if (plugin == null || !plugin.isEnabled()) {
             return;
         }
-        List<Player> playerList = new ArrayList<>(Bukkit.getOnlinePlayers());
-        if (playerList.isEmpty()) {
+        this.playerBuffer.clear();
+        this.playerBuffer.addAll(Bukkit.getOnlinePlayers());
+        if (this.playerBuffer.isEmpty()) {
             return;
         }
-        Collections.shuffle(playerList);
+        Collections.shuffle(this.playerBuffer);
 
         EhConfig config = this.configContainer.get();
         this.generationLimiterService.reset(config.maxGlobalGenerationsPerTick());
@@ -112,58 +122,76 @@ public final class RuntimeOrchestratorService {
         boolean farPlayersEnabled = config.farPlayersEnabled();
         boolean pollEquipment = farPlayersEnabled && Math.floorMod(this.orchestratorTick, config.farPlayerEquipTicks()) == 0;
 
-        for (Player player : playerList) {
+        for (Player player : this.playerBuffer) {
             FoliaTaskUtil.runForPlayer(player, plugin, () -> {
                 try {
                     Location loc = player.getLocation();
                     ServerPlayer nmsPlayer = ((CraftPlayer) player).getHandle();
 
+                    if (player.getGameMode() == GameMode.SPECTATOR || isVanished(player)) {
+                        this.farPlayerCacheService.removePlayer(player.getUniqueId());
+                        return;
+                    }
+
                     if (farPlayersEnabled) {
-                        if (player.getGameMode() == GameMode.SPECTATOR || player.hasMetadata("vanished")) {
-                            this.farPlayerCacheService.removePlayer(player.getUniqueId());
+                        List<SynchedEntityData.DataValue<?>> metadata;
+                        boolean pollMetadata = Math.floorMod(this.orchestratorTick, config.farPlayerMoveTicks()) == 0;
+                        if (pollMetadata) {
+                            metadata = nmsPlayer.getEntityData().packAll();
                         } else {
-                            List<SynchedEntityData.DataValue<?>> metadata;
-                            boolean pollMetadata = Math.floorMod(this.orchestratorTick, config.farPlayerMoveTicks()) == 0;
-                            if (pollMetadata) {
-                                metadata = nmsPlayer.getEntityData().packAll();
+                            FarPlayerState oldState = this.farPlayerCacheService.getState(player.getUniqueId());
+                            if (oldState != null && oldState.metadata() != null) {
+                                metadata = oldState.metadata();
                             } else {
-                                FarPlayerState oldState = this.farPlayerCacheService.getState(player.getUniqueId());
-                                if (oldState != null && oldState.metadata() != null) {
-                                    metadata = oldState.metadata();
-                                } else {
-                                    metadata = nmsPlayer.getEntityData().packAll();
+                                metadata = nmsPlayer.getEntityData().packAll();
+                            }
+                        }
+                        List<Pair<EquipmentSlot, ItemStack>> equipment;
+
+                        if (pollEquipment) {
+                            List<Pair<EquipmentSlot, ItemStack>> prevEquipment = this.lastEquipment.get(player.getUniqueId());
+                            boolean changed = prevEquipment == null || prevEquipment.size() != EQUIPMENT_SLOT_COUNT;
+                            if (!changed) {
+                                for (int i = 0; i < EQUIPMENT_SLOT_COUNT; i++) {
+                                    Pair<EquipmentSlot, ItemStack> prev = prevEquipment.get(i);
+                                    ItemStack current = nmsPlayer.getItemBySlot(prev.getFirst());
+                                    if (!ItemStack.isSameItemSameComponents(prev.getSecond(), current)) {
+                                        changed = true;
+                                        break;
+                                    }
                                 }
                             }
-                            List<Pair<EquipmentSlot, ItemStack>> equipment;
-
-                            if (pollEquipment) {
+                            if (changed) {
                                 equipment = new ArrayList<>(EQUIPMENT_SLOT_COUNT);
                                 for (EquipmentSlot slot : EQUIPMENT_SLOTS) {
                                     ItemStack item = nmsPlayer.getItemBySlot(slot);
                                     equipment.add(Pair.of(slot, item.copy()));
                                 }
+                                this.lastEquipment.put(player.getUniqueId(), new ArrayList<>(equipment));
                                 this.farPlayerCacheService.updateEquipment(player.getUniqueId(), equipment);
                             } else {
-                                equipment = this.farPlayerCacheService.getEquipment(player.getUniqueId());
-                                if (equipment == null) {
-                                    equipment = Collections.emptyList();
-                                }
+                                equipment = prevEquipment;
                             }
-
-                            this.farPlayerCacheService.updateState(player.getUniqueId(), new FarPlayerState(
-                                player.getEntityId(),
-                                player.getUniqueId(),
-                                player.getWorld().getUID(),
-                                loc.getX(),
-                                loc.getY(),
-                                loc.getZ(),
-                                loc.getYaw(),
-                                loc.getPitch(),
-                                nmsPlayer.yHeadRot,
-                                equipment,
-                                metadata
-                            ));
+                        } else {
+                            equipment = this.farPlayerCacheService.getEquipment(player.getUniqueId());
+                            if (equipment == null) {
+                                equipment = Collections.emptyList();
+                            }
                         }
+
+                        this.farPlayerCacheService.updateState(player.getUniqueId(), new FarPlayerState(
+                            player.getEntityId(),
+                            player.getUniqueId(),
+                            player.getWorld().getUID(),
+                            loc.getX(),
+                            loc.getY(),
+                            loc.getZ(),
+                            loc.getYaw(),
+                            loc.getPitch(),
+                            nmsPlayer.yHeadRot,
+                            equipment,
+                            metadata
+                        ));
                     }
 
                     this.fakeChunkOrchestratorService.tickPlayer(player);
@@ -180,7 +208,7 @@ public final class RuntimeOrchestratorService {
             this.farPlayerCacheService.cleanUp();
         }
 
-        if (config.debugEnabled() && Math.floorMod(this.orchestratorTick, 200) == 0) {
+        if (config.debugEnabled() && Math.floorMod(this.orchestratorTick, DEBUG_METRICS_LOG_INTERVAL) == 0) {
             ChunkBuildMetricsService.Snapshot metrics = this.chunkBuildMetricsService.snapshotAndReset();
             if (metrics.hasData()) {
                 LOGGER.info(
@@ -189,7 +217,7 @@ public final class RuntimeOrchestratorService {
                     metrics.antiXraySnapshotCount(),
                     metrics.antiXrayAsyncAvgMicros(),
                     metrics.antiXrayAsyncCount(),
-                    Math.round(metrics.antiXrayCacheHitRate() * 10000.0d) / 100.0d,
+                    Math.round(metrics.antiXrayCacheHitRate() * CACHE_HIT_RATE_SCALE) / PERCENTAGE_DIVISOR,
                     metrics.antiXrayFallbackCount()
                 );
             }
@@ -207,5 +235,15 @@ public final class RuntimeOrchestratorService {
         } catch (Throwable throwable) {
             LOGGER.debug("Failed to cancel runtime task cleanly", throwable);
         }
+    }
+
+    private static boolean isVanished(Player player) {
+        var metadata = player.getMetadata("vanished");
+        for (var entry : metadata) {
+            if (entry.asBoolean()) {
+                return true;
+            }
+        }
+        return false;
     }
 }

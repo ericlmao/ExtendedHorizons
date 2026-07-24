@@ -15,7 +15,9 @@ import org.bukkit.World;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -30,6 +32,7 @@ public final class AntiXrayPayloadCacheService {
     private final Container<EhConfig> configContainer;
     private volatile Cache<AntiXrayPayloadKey, ByteBuf> cache;
     private volatile Cache<UUID, ProfileHashEntry> profileHashCache;
+    private final Map<Long, List<AntiXrayPayloadKey>> chunkIndex = new HashMap<>();
 
     @Inject
     public AntiXrayPayloadCacheService(Container<EhConfig> configContainer) {
@@ -57,6 +60,7 @@ public final class AntiXrayPayloadCacheService {
 
         drainCache(oldCache);
         drainCache(oldProfileHashCache);
+        this.chunkIndex.clear();
     }
 
     public String resolveProfileHash(World world, EhConfig config) {
@@ -111,17 +115,27 @@ public final class AntiXrayPayloadCacheService {
         if (worldId == null || profileHash == null || serializerMode == null || payload == null || !payload.isReadable()) {
             return;
         }
-        this.cache.put(
-            new AntiXrayPayloadKey(worldId, chunkKey, profileHash, serializerMode, FORMAT_VERSION),
-            payload.retainedDuplicate()
-        );
+        AntiXrayPayloadKey key = new AntiXrayPayloadKey(worldId, chunkKey, profileHash, serializerMode, FORMAT_VERSION);
+        this.cache.put(key, payload.retainedDuplicate());
+        long compositeKey = compositeKey(worldId, chunkKey);
+        this.chunkIndex.computeIfAbsent(compositeKey, k -> new ArrayList<>()).add(key);
     }
 
     public void invalidateChunk(UUID worldId, long chunkKey) {
         if (worldId == null) {
             return;
         }
-        this.cache.asMap().keySet().removeIf(key -> key.worldId().equals(worldId) && key.chunkKey() == chunkKey);
+        long compositeKey = compositeKey(worldId, chunkKey);
+        List<AntiXrayPayloadKey> keys = this.chunkIndex.remove(compositeKey);
+        if (keys != null) {
+            for (AntiXrayPayloadKey key : keys) {
+                this.cache.invalidate(key);
+            }
+        }
+    }
+
+    private static long compositeKey(UUID worldId, long chunkKey) {
+        return worldId.hashCode() * 31L + chunkKey;
     }
 
     public void cleanUp() {
@@ -132,6 +146,7 @@ public final class AntiXrayPayloadCacheService {
     public void invalidateAll() {
         this.cache.invalidateAll();
         this.profileHashCache.invalidateAll();
+        this.chunkIndex.clear();
         this.cleanUp();
     }
 
@@ -162,4 +177,3 @@ public final class AntiXrayPayloadCacheService {
         cache.cleanUp();
     }
 }
-
