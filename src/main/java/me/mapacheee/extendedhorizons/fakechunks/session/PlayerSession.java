@@ -62,10 +62,53 @@ public final class PlayerSession {
     private volatile int cachedPermissionCap = PERMISSION_CAP_UNINITIALIZED;
     private volatile boolean cachedHasBypass;
     private volatile long permissionCacheExpiryNanos;
+    private volatile double lastActivityX;
+    private volatile double lastActivityY;
+    private volatile double lastActivityZ;
+    private volatile float lastActivityYaw;
+    private volatile float lastActivityPitch;
+    private volatile long lastActivityNanos;
+    private volatile boolean activityInitialized;
+    private volatile boolean afkSuspended;
 
     public PlayerSession(UUID playerId, UUID worldId) {
         this.playerId = playerId;
         this.worldId = worldId;
+    }
+
+    /**
+     * Records the player's current position/rotation and returns true if it changed since the
+     * last call (i.e. the player showed activity). Used by the AFK pause feature.
+     */
+    public boolean recordActivity(double x, double y, double z, float yaw, float pitch, long nowNanos) {
+        if (!this.activityInitialized
+            || x != this.lastActivityX
+            || y != this.lastActivityY
+            || z != this.lastActivityZ
+            || yaw != this.lastActivityYaw
+            || pitch != this.lastActivityPitch) {
+            this.lastActivityX = x;
+            this.lastActivityY = y;
+            this.lastActivityZ = z;
+            this.lastActivityYaw = yaw;
+            this.lastActivityPitch = pitch;
+            this.lastActivityNanos = nowNanos;
+            this.activityInitialized = true;
+            return true;
+        }
+        return false;
+    }
+
+    public long idleNanos(long nowNanos) {
+        return this.activityInitialized ? nowNanos - this.lastActivityNanos : 0L;
+    }
+
+    public boolean afkSuspended() {
+        return this.afkSuspended;
+    }
+
+    public void afkSuspended(boolean afkSuspended) {
+        this.afkSuspended = afkSuspended;
     }
 
     public int cachedPermissionCap() {

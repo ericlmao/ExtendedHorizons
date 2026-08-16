@@ -108,8 +108,39 @@ public final class FakeChunkOrchestratorService {
         Location loc = player.getLocation();
         int chunkX = loc.getBlockX() >> 4;
         int chunkZ = loc.getBlockZ() >> 4;
-        int targetDistance = this.resolveClientDistance(player, session, worldName);
         int serverDistance = this.resolveServerDistance(player);
+
+        EhConfig config = this.configContainer.get();
+        if (config.afkPauseEnabled()) {
+            long nowNanos = System.nanoTime();
+            boolean active = session.recordActivity(loc.getX(), loc.getY(), loc.getZ(), loc.getYaw(), loc.getPitch(), nowNanos);
+            if (!active && session.idleNanos(nowNanos) >= config.afkPauseTimeoutNanos()) {
+                // Player has been standing completely still (AFK alts etc.); stop maintaining
+                // their extended view distance until they move again. Teardown happens once,
+                // after which their tick is a near-free early return.
+                if (!session.afkSuspended()) {
+                    session.afkSuspended(true);
+                    session.serverViewDistance(serverDistance);
+                    if (session.initiated() || session.enabled()) {
+                        this.clearSessionState(channel, session);
+                    }
+                    if (config.debugEnabled()) {
+                        LOGGER.info("EH afk-pause suspended player={}", player.getUniqueId());
+                    }
+                }
+                return;
+            }
+            if (session.afkSuspended()) {
+                // clearSessionState reset initiated/enabled, so the normal flow below performs
+                // a full re-initialization of the extended view distance
+                session.afkSuspended(false);
+                if (config.debugEnabled()) {
+                    LOGGER.info("EH afk-pause resumed player={}", player.getUniqueId());
+                }
+            }
+        }
+
+        int targetDistance = this.resolveClientDistance(player, session, worldName);
 
         boolean chunkChanged = session.hasChunkChanged(chunkX, chunkZ);
         boolean distanceChanged = (session.lastAdvertisedDistance() != targetDistance || session.distance() != targetDistance);

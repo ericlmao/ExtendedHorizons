@@ -48,6 +48,8 @@ public record EhConfig(
     private static final int DEFAULT_FAR_PLAYER_MOVE_TICKS = 4;
     private static final int MIN_FAR_PLAYER_MOVE_TICKS = 1;
     private static final int DEFAULT_FAR_PLAYER_EQUIP_TICKS = 15;
+    private static final int DEFAULT_AFK_PAUSE_TIMEOUT_SECONDS = 300;
+    private static final int MIN_AFK_PAUSE_TIMEOUT_SECONDS = 30;
 
     private static final List<String> DEFAULT_ANTI_XRAY_HIDDEN_BLOCKS = List.of(
         "minecraft:diamond_ore",
@@ -88,6 +90,21 @@ public record EhConfig(
             return DEFAULT_TARGET_VIEW_DISTANCE;
         }
         return Math.max(MIN_VIEW_DISTANCE, this.fakeChunks.targetViewDistance());
+    }
+
+    public boolean afkPauseEnabled() {
+        if (this.fakeChunks == null || this.fakeChunks.afkPause() == null) {
+            return false;
+        }
+        return Boolean.TRUE.equals(this.fakeChunks.afkPause().enabled());
+    }
+
+    public long afkPauseTimeoutNanos() {
+        int seconds = DEFAULT_AFK_PAUSE_TIMEOUT_SECONDS;
+        if (this.fakeChunks != null && this.fakeChunks.afkPause() != null && this.fakeChunks.afkPause().timeoutSeconds() > 0) {
+            seconds = Math.max(MIN_AFK_PAUSE_TIMEOUT_SECONDS, this.fakeChunks.afkPause().timeoutSeconds());
+        }
+        return seconds * 1_000_000_000L;
     }
 
     public boolean fakeChunksEnabledForWorld(String worldName) {
@@ -315,7 +332,14 @@ public record EhConfig(
         @Setting("disk-reader-enabled") Boolean diskReaderEnabled,
         CacheConfig cache,
         RuntimeConfig runtime,
-        @Setting("far-players") FarPlayersConfig farPlayers
+        @Setting("far-players") FarPlayersConfig farPlayers,
+        @Setting("afk-pause") AfkPauseConfig afkPause
+    ) {}
+
+    @ConfigSerializable
+    public record AfkPauseConfig(
+        Boolean enabled,
+        @Setting("timeout-seconds") int timeoutSeconds
     ) {}
 
     @ConfigSerializable
