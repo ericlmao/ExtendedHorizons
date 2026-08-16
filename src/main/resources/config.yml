@@ -75,6 +75,15 @@ fake-chunks:
     # Update interval for far-player equipment/metadata packets.
     equip-ticks: 30
 
+  afk-pause:
+    # When a player has not moved (position or look) for timeout-seconds, their extended
+    # view distance is unloaded and no fake chunk / far-player work is done for them until
+    # they move again. Useful for AFK players and alt accounts that stand still for hours.
+    # Other players still see AFK players normally.
+    enabled: true
+    # Seconds of complete stillness before a player is considered AFK (minimum 30).
+    timeout-seconds: 300
+
   cache:
     # Serialized fake chunk cache TTL.
     ttl-seconds: 10
