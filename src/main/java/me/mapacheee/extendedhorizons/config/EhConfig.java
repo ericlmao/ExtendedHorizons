@@ -79,7 +79,10 @@ public record EhConfig(
     }
 
     public boolean debugEnabled() {
-        return this.debug == null || this.debug.enabled();
+        // Debug must be opt-in: defaulting to ON when the config section is
+        // absent turned per-player-per-tick INFO logging on for every server
+        // running without an explicit debug block.
+        return this.debug != null && this.debug.enabled();
     }
 
     public int targetViewDistance(String worldName) {

@@ -29,6 +29,7 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
     private static final int VARINT_MAX_BYTES = 5;
     private static final int BUNDLE_VARINT_HEADER_SIZE = 2;
     private static final int BUNDLE_TRAILER_BYTE_COUNT = 1;
+    private static final int MALFORMED_VARINT = Integer.MIN_VALUE;
     private static final MethodHandle CHUNK_POS_X_GETTER;
     private static final MethodHandle CHUNK_POS_Z_GETTER;
 
@@ -76,9 +77,9 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
             return;
         }
 
-        if (msg instanceof ByteBuf buf && this.isPreEncodedRadiusPacket(buf)) {
+        if (msg instanceof ByteBuf buf) {
             PlayerSession session = this.session;
-            if (session != null && session.enabled()) {
+            if (session != null && session.enabled() && isPreEncodedRadiusPacket(buf)) {
                 session.lastAdvertisedDistance(-1);
                 ReferenceCountUtil.release(msg);
                 promise.setSuccess();
@@ -100,13 +101,16 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
         super.write(ctx, msg, promise);
     }
 
-    private boolean isPreEncodedRadiusPacket(ByteBuf buf) {
+    private static boolean isPreEncodedRadiusPacket(ByteBuf buf) {
         if (!PacketIdRegistry.hasChunkCacheRadiusId() || !buf.isReadable()) {
             return false;
         }
         int readerIndex = buf.readerIndex();
         try {
             int firstVarInt = readVarInt(buf);
+            if (firstVarInt == MALFORMED_VARINT) {
+                return false;
+            }
             int targetId = PacketIdRegistry.getChunkCacheRadiusId();
 
             if (firstVarInt == targetId) {
@@ -119,19 +123,22 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
                     return true;
                 }
             }
-        } catch (Exception ignored) {
         } finally {
             buf.readerIndex(readerIndex);
         }
         return false;
     }
 
+    /**
+     * Peek-style varint read: returns {@link #MALFORMED_VARINT} on underflow or
+     * overlong encoding instead of allocating an exception per inspected buffer.
+     */
     private static int readVarInt(ByteBuf buf) {
         int value = 0;
         int position = 0;
         while (position < VARINT_MAX_BYTES) {
             if (!buf.isReadable()) {
-                throw new IndexOutOfBoundsException();
+                return MALFORMED_VARINT;
             }
             int currentByte = buf.readByte() & 0xFF;
             value |= (currentByte & 0x7F) << (position * 7);
@@ -140,7 +147,7 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
             }
             position++;
         }
-        throw new IllegalArgumentException("VarInt too big");
+        return MALFORMED_VARINT;
     }
 
     private static boolean hasRadiusPacket(BundlePacket<?> bundle) {

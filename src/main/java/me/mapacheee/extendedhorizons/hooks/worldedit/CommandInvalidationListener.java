@@ -25,6 +25,14 @@ public final class CommandInvalidationListener implements Listener {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CommandInvalidationListener.class);
 
+    /**
+     * Upper bound on invalidated chunks per command. Vanilla /fill caps at
+     * 32768 blocks (~9 chunks); this event fires BEFORE the command validates,
+     * so without a cap a bogus "/fill -30000000 .. 30000000" would loop over
+     * trillions of chunk positions on the main thread.
+     */
+    private static final long MAX_INVALIDATED_CHUNKS = 4096;
+
     private final BulkChunkInvalidationService bulkChunkInvalidationService;
     private final Container<EhConfig> configContainer;
 
@@ -46,12 +54,20 @@ public final class CommandInvalidationListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onServerCommand(ServerCommandEvent event) {
         if (!this.configContainer.get().worldEditEnabled()) return;
-        this.handleVanillaCommand(event.getSender(), "/" + event.getCommand());
+        String command = event.getCommand();
+        if (!command.regionMatches(true, 0, "fill ", 0, 5)
+            && !command.regionMatches(true, 0, "clone ", 0, 6)) {
+            return;
+        }
+        this.handleVanillaCommand(event.getSender(), "/" + command);
     }
 
     private void handleVanillaCommand(CommandSender sender, String commandLine) {
-        String lowerCmd = commandLine.toLowerCase();
-        if (!lowerCmd.startsWith("/fill ") && !lowerCmd.startsWith("/clone ")) {
+        // Prefix-check without allocating a lowercase copy of every command
+        // typed on the server.
+        boolean isFill = commandLine.regionMatches(true, 0, "/fill ", 0, 6);
+        boolean isClone = !isFill && commandLine.regionMatches(true, 0, "/clone ", 0, 7);
+        if (!isFill && !isClone) {
             return;
         }
 
@@ -94,14 +110,9 @@ public final class CommandInvalidationListener implements Listener {
 
             UUID worldId = world.getUID();
 
-            for (int cx = minChunkX; cx <= maxChunkX; cx++) {
-                for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
-                    long chunkKey = ChunkKeyCodec.pack(cx, cz);
-                    this.bulkChunkInvalidationService.queueInvalidation(worldId, chunkKey);
-                }
-            }
+            this.queueRegion(worldId, minChunkX, maxChunkX, minChunkZ, maxChunkZ);
 
-            if (lowerCmd.startsWith("/clone ") && args.length >= 10) {
+            if (isClone && args.length >= 10) {
                 int dx = this.parseCoordinate(args[7], sourceLoc.getX());
                 int dz = this.parseCoordinate(args[9], sourceLoc.getZ());
 
@@ -113,16 +124,23 @@ public final class CommandInvalidationListener implements Listener {
                 int dMinChunkZ = dz >> 4;
                 int dMaxChunkZ = dMaxZ >> 4;
 
-                for (int cx = dMinChunkX; cx <= dMaxChunkX; cx++) {
-                    for (int cz = dMinChunkZ; cz <= dMaxChunkZ; cz++) {
-                        long chunkKey = ChunkKeyCodec.pack(cx, cz);
-                        this.bulkChunkInvalidationService.queueInvalidation(worldId, chunkKey);
-                    }
-                }
+                this.queueRegion(worldId, dMinChunkX, dMaxChunkX, dMinChunkZ, dMaxChunkZ);
             }
 
         } catch (NumberFormatException error) {
-            LOGGER.debug("Could not parse coordinates for command {} (Invalid format).", lowerCmd, error);
+            LOGGER.debug("Could not parse coordinates for command {} (Invalid format).", commandLine, error);
+        }
+    }
+
+    private void queueRegion(UUID worldId, int minChunkX, int maxChunkX, int minChunkZ, int maxChunkZ) {
+        long area = (long) (maxChunkX - minChunkX + 1) * (maxChunkZ - minChunkZ + 1);
+        if (area > MAX_INVALIDATED_CHUNKS) {
+            return;
+        }
+        for (int cx = minChunkX; cx <= maxChunkX; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
+                this.bulkChunkInvalidationService.queueInvalidation(worldId, ChunkKeyCodec.pack(cx, cz));
+            }
         }
     }
 

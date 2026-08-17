@@ -27,8 +27,6 @@ import org.bukkit.entity.Player;
 import javax.annotation.Nullable;
 import java.time.Duration;
 import java.util.UUID;
-import me.mapacheee.lib.caffeine.cache.Cache;
-import me.mapacheee.lib.caffeine.cache.Caffeine;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,7 +51,6 @@ public final class FakeChunkOrchestratorService {
     private final ChannelInjectionService channelInjectionService;
     private final FarPlayerTrackingService farPlayerTrackingService;
     private final FarPlayerCacheService farPlayerCacheService;
-    private Cache<UUID, PermissionCacheEntry> permissionCache;
 
     @Inject
     public FakeChunkOrchestratorService(
@@ -70,18 +67,6 @@ public final class FakeChunkOrchestratorService {
         this.channelInjectionService = channelInjectionService;
         this.farPlayerTrackingService = farPlayerTrackingService;
         this.farPlayerCacheService = farPlayerCacheService;
-        this.rebuildPermissionCache();
-    }
-
-    public void rebuildPermissionCache() {
-        EhConfig config = this.configContainer.get();
-        long maxSize = config.permissionCacheEntries();
-        int ttlSeconds = config.permissionCacheTtlSeconds();
-        Duration ttl = ttlSeconds > 0 ? Duration.ofSeconds(ttlSeconds) : DEFAULT_PERMISSION_TTL;
-        this.permissionCache = Caffeine.newBuilder()
-            .maximumSize(maxSize)
-            .expireAfterWrite(ttl)
-            .build();
     }
 
     public void tickPlayer(Player player) {
@@ -310,9 +295,9 @@ public final class FakeChunkOrchestratorService {
         }
 
         int worldDistance = this.configContainer.get().targetViewDistance(worldName);
-        PermissionCacheEntry permissionSnapshot = this.resolvePermissionSnapshot(player, session);
-        int permissionCap = permissionSnapshot.permissionCap();
-        boolean hasBypass = permissionSnapshot.hasBypass();
+        this.refreshPermissionSnapshot(player, session);
+        int permissionCap = session.cachedPermissionCap();
+        boolean hasBypass = session.cachedHasBypass();
 
         int effectiveCap;
         if (permissionCap > 0) {
@@ -345,27 +330,17 @@ public final class FakeChunkOrchestratorService {
         return Math.max(MIN_DISTANCE, target);
     }
 
-    private PermissionCacheEntry resolvePermissionSnapshot(Player player, PlayerSession session) {
+    private void refreshPermissionSnapshot(Player player, PlayerSession session) {
         long now = System.nanoTime();
-        int cachedCap = session.cachedPermissionCap();
-        if (cachedCap != PERMISSION_CAP_UNINITIALIZED && now < session.permissionCacheExpiryNanos()) {
-            return new PermissionCacheEntry(cachedCap, session.cachedHasBypass());
+        if (session.cachedPermissionCap() != PERMISSION_CAP_UNINITIALIZED && now < session.permissionCacheExpiryNanos()) {
+            return;
         }
 
-        int permissionCap = resolvePermissionCap(player);
-        boolean hasBypass = player.hasPermission(PERMISSION_BYPASS);
-
-        session.cachedPermissionCap(permissionCap);
-        session.cachedHasBypass(hasBypass);
+        session.cachedPermissionCap(resolvePermissionCap(player));
+        session.cachedHasBypass(player.hasPermission(PERMISSION_BYPASS));
         int ttlSeconds = this.configContainer.get().permissionCacheTtlSeconds();
         long ttlNanos = ttlSeconds > 0 ? Duration.ofSeconds(ttlSeconds).toNanos() : DEFAULT_PERMISSION_TTL.toNanos();
         session.permissionCacheExpiryNanos(now + ttlNanos);
-
-        UUID playerId = player.getUniqueId();
-        PermissionCacheEntry updated = new PermissionCacheEntry(permissionCap, hasBypass);
-        this.permissionCache.put(playerId, updated);
-
-        return updated;
     }
 
     private static final int MAX_PERMISSION_CAP = 100;
@@ -390,7 +365,6 @@ public final class FakeChunkOrchestratorService {
         if (playerId == null) {
             return;
         }
-        this.permissionCache.invalidate(playerId);
         PlayerSession session = this.sessionRegistry.get(playerId);
         if (session != null) {
             session.cachedPermissionCap(PERMISSION_CAP_UNINITIALIZED);
@@ -398,7 +372,6 @@ public final class FakeChunkOrchestratorService {
     }
 
     public void invalidateAllPermissionCache() {
-        this.permissionCache.invalidateAll();
         this.sessionRegistry.forEachSession(session -> session.cachedPermissionCap(PERMISSION_CAP_UNINITIALIZED));
     }
 
@@ -435,5 +408,4 @@ public final class FakeChunkOrchestratorService {
         Collection<FarPlayerState> visibleCandidates
     ) {}
 
-    private record PermissionCacheEntry(int permissionCap, boolean hasBypass) {}
 }

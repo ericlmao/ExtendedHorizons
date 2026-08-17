@@ -19,6 +19,8 @@ import java.util.function.Supplier;
 @Service
 public final class ChunkBuildCacheService {
 
+    private static final int AVERAGE_PAYLOAD_WEIGHT_BYTES = 64 * 1024;
+
     private final Container<EhConfig> configContainer;
 
     private volatile Cache<ChunkKey, ByteBuf> serializedCache;
@@ -42,7 +44,8 @@ public final class ChunkBuildCacheService {
         Cache<ChunkKey, Long> oldUnavailableCache = this.unavailableUntilMs;
 
         Cache<ChunkKey, ByteBuf> newSerializedCache = Caffeine.newBuilder()
-            .maximumSize(maxEntries)
+            .maximumWeight((long) maxEntries * AVERAGE_PAYLOAD_WEIGHT_BYTES)
+            .weigher((ChunkKey key, ByteBuf value) -> Math.max(1, value.readableBytes()))
             .expireAfterWrite(Duration.ofSeconds(ttlSeconds))
             .expireAfterAccess(Duration.ofSeconds(Math.min(ttlSeconds, 60L)))
             .removalListener((ChunkKey key, ByteBuf value, RemovalCause cause) -> ReferenceCountUtil.release(value))
@@ -84,10 +87,7 @@ public final class ChunkBuildCacheService {
             return null;
         }
         ByteBuf payload = this.serializedCache.getIfPresent(new ChunkKey(worldId, chunkKey));
-        if (payload == null || !payload.isReadable()) {
-            return null;
-        }
-        return payload.retainedDuplicate();
+        return CacheBufUtil.retainReadableOrNull(payload);
     }
 
     public CompletableFuture<ByteBuf> getOrStartBuildFuture(
@@ -99,13 +99,14 @@ public final class ChunkBuildCacheService {
             return CompletableFuture.completedFuture(null);
         }
         ChunkKey key = new ChunkKey(worldId, chunkKey);
-        CompletableFuture<ByteBuf> existing = this.buildEntryCache.getIfPresent(key);
-        if (existing != null) {
-            return existing.thenApply(this::retainReadable);
+        boolean[] created = new boolean[1];
+        CompletableFuture<ByteBuf> shared = this.buildEntryCache.asMap().computeIfAbsent(key, k -> {
+            created[0] = true;
+            return new CompletableFuture<>();
+        });
+        if (!created[0]) {
+            return shared.thenApply(this::retainReadable);
         }
-
-        CompletableFuture<ByteBuf> shared = new CompletableFuture<>();
-        this.buildEntryCache.put(key, shared);
 
         CompletableFuture<ByteBuf> started;
         try {
@@ -198,10 +199,7 @@ public final class ChunkBuildCacheService {
     }
 
     private ByteBuf retainReadable(ByteBuf payload) {
-        if (payload == null || !payload.isReadable()) {
-            return null;
-        }
-        return payload.retainedDuplicate();
+        return CacheBufUtil.retainReadableOrNull(payload);
     }
 
     private static void releaseFuturePayload(CompletableFuture<ByteBuf> value) {

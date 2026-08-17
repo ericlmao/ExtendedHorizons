@@ -52,7 +52,20 @@ final class HeightmapWriter {
     }
 
     static int estimateHeightmapsSize(LevelChunk chunk) {
-        return estimateHeightmapsSize(extractHeightmapsData(chunk));
+        int bits = net.minecraft.util.Mth.ceillog2(chunk.getHeight() + 1);
+        int entriesPerLong = Long.SIZE / bits;
+        int longsPerHeightmap = (256 + entriesPerLong - 1) / entriesPerLong;
+        int perHeightmapBytes = VarInt.getByteSize(longsPerHeightmap) + longsPerHeightmap * Long.BYTES;
+
+        int count = 0;
+        int size = 0;
+        for (int i = 0; i < SENDABLE_HEIGHTMAP_TYPES.length; i++) {
+            if (chunk.hasPrimedHeightmap(SENDABLE_HEIGHTMAP_TYPES[i])) {
+                count++;
+                size += VarInt.getByteSize(SENDABLE_HEIGHTMAP_TYPE_IDS[i]) + perHeightmapBytes;
+            }
+        }
+        return VarInt.getByteSize(count) + size;
     }
 
     static int estimateHeightmapsSize(long[][] heightmapsData) {

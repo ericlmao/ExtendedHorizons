@@ -10,6 +10,7 @@ import me.mapacheee.extendedhorizons.fakechunks.netty.ChannelInjectionService;
 import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
 import me.mapacheee.extendedhorizons.fakechunks.session.SessionRegistry;
 import me.mapacheee.extendedhorizons.messages.MessagesFacade;
+import me.mapacheee.extendedhorizons.runtime.RuntimeOrchestratorService;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -27,6 +28,7 @@ public final class PlayerLifecycleListener implements Listener {
     private final FakeChunkOrchestratorService fakeChunkOrchestratorService;
     private final MessagesFacade messages;
     private final Container<EhConfig> configContainer;
+    private final RuntimeOrchestratorService runtimeOrchestratorService;
 
     @Inject
     public PlayerLifecycleListener(
@@ -35,7 +37,8 @@ public final class PlayerLifecycleListener implements Listener {
         FarPlayerCacheService farPlayerCacheService,
         FakeChunkOrchestratorService fakeChunkOrchestratorService,
         MessagesFacade messages,
-        Container<EhConfig> configContainer
+        Container<EhConfig> configContainer,
+        RuntimeOrchestratorService runtimeOrchestratorService
     ) {
         this.sessionRegistry = sessionRegistry;
         this.channelInjectionService = channelInjectionService;
@@ -43,6 +46,7 @@ public final class PlayerLifecycleListener implements Listener {
         this.fakeChunkOrchestratorService = fakeChunkOrchestratorService;
         this.messages = messages;
         this.configContainer = configContainer;
+        this.runtimeOrchestratorService = runtimeOrchestratorService;
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -60,7 +64,12 @@ public final class PlayerLifecycleListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
-        this.fakeChunkOrchestratorService.invalidatePermissionCache(player.getUniqueId());
+        // Only a world change can affect world-scoped permissions; same-world
+        // teleports (pearls, warps, dismounts) don't need the up-to-100
+        // hasPermission() recompute that a cache invalidation triggers.
+        if (event.getTo() == null || event.getFrom().getWorld() != event.getTo().getWorld()) {
+            this.fakeChunkOrchestratorService.invalidatePermissionCache(player.getUniqueId());
+        }
         PlayerSession session = this.sessionRegistry.ensureFor(player, false);
         this.channelInjectionService.inject(player, session);
     }
@@ -72,6 +81,7 @@ public final class PlayerLifecycleListener implements Listener {
         this.channelInjectionService.uninject(player);
         this.sessionRegistry.remove(player.getUniqueId());
         this.farPlayerCacheService.removePlayer(player.getUniqueId());
+        this.runtimeOrchestratorService.removePlayer(player.getUniqueId());
     }
 }
 

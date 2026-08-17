@@ -52,11 +52,13 @@ public final class ChunkInvalidationListener implements Listener {
         this.channelInjectionService = channelInjectionService;
     }
 
+    private static final BlockData AIR_DATA = Material.AIR.createBlockData();
+
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBreak(BlockBreakEvent event) {
         Block block = event.getBlock();
         this.invalidateCaches(block);
-        this.broadcastBlockChange(block, Material.AIR.createBlockData());
+        this.broadcastBlockChange(block, AIR_DATA);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -82,10 +84,11 @@ public final class ChunkInvalidationListener implements Listener {
         int chunkZ = block.getZ() >> CHUNK_SHIFT;
         long chunkKey = ChunkKeyCodec.pack(chunkX, chunkZ);
 
-        BlockPos pos = new BlockPos(block.getX(), block.getY(), block.getZ());
-        BlockState nmsState = ((CraftBlockData) blockData).getState();
-        ClientboundBlockUpdatePacket packet = new ClientboundBlockUpdatePacket(pos, nmsState);
-
+        // Fake chunks live beyond view distance while breaks/places happen next
+        // to players, so in the overwhelmingly common case no session has this
+        // chunk EH-loaded. Build the packet lazily on the first recipient
+        // instead of allocating BlockPos + BlockState + packet per event.
+        ClientboundBlockUpdatePacket[] lazyPacket = new ClientboundBlockUpdatePacket[1];
         this.sessionRegistry.forEachSession(session -> {
             if (!worldId.equals(session.worldId())) {
                 return;
@@ -95,7 +98,12 @@ public final class ChunkInvalidationListener implements Listener {
                 if (player != null) {
                     Channel channel = this.channelInjectionService.resolveChannel(player);
                     if (channel != null && channel.isActive()) {
-                        this.channelInjectionService.writeBypass(channel, packet);
+                        if (lazyPacket[0] == null) {
+                            BlockPos pos = new BlockPos(block.getX(), block.getY(), block.getZ());
+                            BlockState nmsState = ((CraftBlockData) blockData).getState();
+                            lazyPacket[0] = new ClientboundBlockUpdatePacket(pos, nmsState);
+                        }
+                        this.channelInjectionService.writeBypass(channel, lazyPacket[0]);
                         this.channelInjectionService.flush(channel);
                     }
                 }

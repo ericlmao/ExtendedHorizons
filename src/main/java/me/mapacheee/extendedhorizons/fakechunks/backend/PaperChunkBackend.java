@@ -54,7 +54,6 @@ public final class PaperChunkBackend implements ChunkBackend {
     private static final int HEIGHTMAP_BUFFER_MAX = 64 * 1024;
     private static final int SECTION_STATES_MAX_BUFFER = 128 * 1024;
     private static final int LIGHT_MAX_BUFFER = 512 * 1024;
-    private static final int LIGHT_ESTIMATE_VANILLA = 2048;
     private static final int CHUNK_ESTIMATE_FAST = 1024;
     private static final int CHUNK_ESTIMATE_VANILLA = 2048;
 
@@ -296,7 +295,32 @@ public final class PaperChunkBackend implements ChunkBackend {
         boolean hasLight = FastLightDataWriter.hasInitialisedLight(chunk);
         boolean useFast = preferFast && canUseFastChunkData && hasLight;
 
-        int initialCapacity = this.estimatePacketSize(chunk, antiXrayProcessor, useFast);
+        ByteBuf cachedLight = null;
+        FastLightDataWriter.PreparedLight preparedLight = null;
+        int lightEstimate;
+        if (useFast) {
+            cachedLight = this.lightPayloadCacheService.get(worldId, chunkKey);
+            if (cachedLight != null) {
+                lightEstimate = cachedLight.readableBytes();
+            } else {
+                preparedLight = FastLightDataWriter.prepareLightData(chunk);
+                lightEstimate = preparedLight.size();
+            }
+        } else {
+            lightEstimate = estimateVanillaLightSize(chunk);
+        }
+
+        int sectionBufferEstimate = (antiXrayProcessor != null || !useFast) ? this.estimateSectionBufferSize(chunk) : 0;
+        int chunkEstimate;
+        if (useFast && antiXrayProcessor != null) {
+            chunkEstimate = sectionBufferEstimate + CHUNK_ESTIMATE_FAST;
+        } else if (useFast) {
+            chunkEstimate = FastChunkDataWriter.estimateChunkDataSize(chunk);
+        } else {
+            chunkEstimate = sectionBufferEstimate + CHUNK_ESTIMATE_VANILLA;
+        }
+
+        int initialCapacity = Math.max(MIN_PACKET_SIZE, PACKET_HEADER_SIZE + chunkEstimate + lightEstimate);
         ByteBuf raw = PooledByteBufAllocator.DEFAULT.buffer(initialCapacity, MAX_PACKET_BUFFER);
         FriendlyByteBuf buf = new FriendlyByteBuf(raw);
         try {
@@ -308,11 +332,15 @@ public final class PaperChunkBackend implements ChunkBackend {
                 int payloadStart = buf.writerIndex();
                 try {
                     if (antiXrayProcessor != null) {
-                        this.writeChunkDataWithAntiXray(buf, chunk, antiXrayProcessor);
+                        this.writeChunkDataWithAntiXray(buf, chunk, antiXrayProcessor, sectionBufferEstimate);
                     } else {
                         FastChunkDataWriter.writeChunkData(buf, chunk);
                     }
-                    this.writeFastLightWithCache(buf, chunk, worldId, chunkKey);
+                    if (cachedLight != null) {
+                        buf.writeBytes(cachedLight, cachedLight.readerIndex(), cachedLight.readableBytes());
+                    } else {
+                        this.writePreparedLightAndCache(buf, preparedLight, worldId, chunkKey);
+                    }
                     return raw;
                 } catch (Throwable throwable) {
                     LOGGER.warn("Fast path failed for chunk [{}, {}]: {}", chunkX, chunkZ, throwable.getMessage(), throwable);
@@ -360,14 +388,23 @@ public final class PaperChunkBackend implements ChunkBackend {
             LOGGER.warn("All serialization paths failed for chunk [{}, {}]: {}", chunkX, chunkZ, throwable.getMessage(), throwable);
             raw.release();
             return null;
+        } finally {
+            if (cachedLight != null) {
+                cachedLight.release();
+            }
         }
     }
 
 
-    private void writeChunkDataWithAntiXray(FriendlyByteBuf out, LevelChunk chunk, AntiXrayProcessor antiXrayProcessor) {
+    private void writeChunkDataWithAntiXray(
+        FriendlyByteBuf out,
+        LevelChunk chunk,
+        AntiXrayProcessor antiXrayProcessor,
+        int sectionBufferEstimate
+    ) {
         writeHeightmaps(out, chunk);
 
-        ByteBuf sectionBuffer = PooledByteBufAllocator.DEFAULT.buffer(this.estimateSectionBufferSize(chunk), SECTION_MAX_BUFFER);
+        ByteBuf sectionBuffer = PooledByteBufAllocator.DEFAULT.buffer(sectionBufferEstimate, SECTION_MAX_BUFFER);
         try {
             FriendlyByteBuf sectionBuf = new FriendlyByteBuf(sectionBuffer);
             int minSectionY = chunk.getMinSectionY();
@@ -439,18 +476,9 @@ public final class PaperChunkBackend implements ChunkBackend {
         lightData.write(buf);
     }
 
-    private int estimatePacketSize(LevelChunk chunk, AntiXrayProcessor antiXrayProcessor, boolean useFast) {
-      int chunkEstimate;
-        if (useFast && antiXrayProcessor != null) {
-            chunkEstimate = this.estimateSectionBufferSize(chunk) + CHUNK_ESTIMATE_FAST;
-        } else if (useFast) {
-            chunkEstimate = FastChunkDataWriter.estimateChunkDataSize(chunk);
-        } else {
-            chunkEstimate = this.estimateSectionBufferSize(chunk) + CHUNK_ESTIMATE_VANILLA;
-        }
-
-        int lightEstimate = useFast ? FastLightDataWriter.estimateLightDataSize(chunk) : LIGHT_ESTIMATE_VANILLA;
-        return Math.max(MIN_PACKET_SIZE, PACKET_HEADER_SIZE + chunkEstimate + lightEstimate);
+    private static int estimateVanillaLightSize(LevelChunk chunk) {
+        int lightSections = chunk.getSectionsCount() + 2;
+        return 64 + lightSections * 2 * (2048 + 8);
     }
 
     private int estimateSectionBufferSize(LevelChunk chunk) {
@@ -472,18 +500,28 @@ public final class PaperChunkBackend implements ChunkBackend {
             }
         }
 
+        this.writePreparedLightAndCache(out, FastLightDataWriter.prepareLightData(chunk), worldId, chunkKey);
+    }
+
+    private void writePreparedLightAndCache(
+        FriendlyByteBuf out,
+        FastLightDataWriter.PreparedLight preparedLight,
+        UUID worldId,
+        long chunkKey
+    ) {
         int start = out.writerIndex();
-        FastLightDataWriter.writeLightData(out, chunk);
+        FastLightDataWriter.writeLightData(out, preparedLight);
         int length = out.writerIndex() - start;
         if (length <= 0) {
             return;
         }
 
-        ByteBuf slice = out.retainedSlice(start, length);
+        ByteBuf copy = PooledByteBufAllocator.DEFAULT.buffer(length, length);
         try {
-            this.lightPayloadCacheService.put(worldId, chunkKey, slice);
+            copy.writeBytes(out, start, length);
+            this.lightPayloadCacheService.put(worldId, chunkKey, copy);
         } finally {
-            slice.release();
+            copy.release();
         }
     }
 
@@ -493,8 +531,12 @@ public final class PaperChunkBackend implements ChunkBackend {
         UUID worldId,
         long chunkKey
     ) {
-        ByteBuf heightmaps = PooledByteBufAllocator.DEFAULT.buffer(HEIGHTMAP_BUFFER_INITIAL, HEIGHTMAP_BUFFER_MAX);
         ByteBuf light = this.lightPayloadCacheService.get(worldId, chunkKey);
+        if (light == null && !FastLightDataWriter.hasInitialisedLight(chunk)) {
+            return null;
+        }
+
+        ByteBuf heightmaps = PooledByteBufAllocator.DEFAULT.buffer(HEIGHTMAP_BUFFER_INITIAL, HEIGHTMAP_BUFFER_MAX);
         AntiXraySectionSnapshot[] sectionSnapshots = null;
         try {
             FriendlyByteBuf heightmapsOut = new FriendlyByteBuf(heightmaps);
@@ -508,34 +550,33 @@ public final class PaperChunkBackend implements ChunkBackend {
                 short nonEmptyBlockCount = getNonEmptyBlockCount(section);
                 ByteBuf states = PooledByteBufAllocator.DEFAULT.buffer(
                     Math.max(SECTION_BUFFER_MIN, section.getSerializedSize()), SECTION_STATES_MAX_BUFFER);
-                ByteBuf biomes = PooledByteBufAllocator.DEFAULT.buffer(BIOME_BUFFER_SIZE, HEIGHTMAP_BUFFER_MAX);
-                FriendlyByteBuf statesOut = new FriendlyByteBuf(states);
-                FriendlyByteBuf biomesOut = new FriendlyByteBuf(biomes);
-
-                section.getStates().write(statesOut, null, 0);
-                section.getBiomes().write(biomesOut, null, 0);
-
+                ByteBuf biomes;
+                try {
+                    biomes = PooledByteBufAllocator.DEFAULT.buffer(BIOME_BUFFER_SIZE, HEIGHTMAP_BUFFER_MAX);
+                } catch (Throwable throwable) {
+                    states.release();
+                    throw throwable;
+                }
+                // Register the buffers with the snapshot array before writing so the
+                // catch block below can release them if a write throws mid-loop.
                 sectionSnapshots[i] = new AntiXraySectionSnapshot(
                     i + minSectionY,
                     nonEmptyBlockCount,
                     states,
                     biomes
                 );
+
+                FriendlyByteBuf statesOut = new FriendlyByteBuf(states);
+                FriendlyByteBuf biomesOut = new FriendlyByteBuf(biomes);
+                section.getStates().write(statesOut, null, 0);
+                section.getBiomes().write(biomesOut, null, 0);
             }
 
             if (light == null) {
-                if (!FastLightDataWriter.hasInitialisedLight(chunk)) {
-                    for (AntiXraySectionSnapshot snap : sectionSnapshots) {
-                        if (snap != null) {
-                            snap.release();
-                        }
-                    }
-                    heightmaps.release();
-                    return null;
-                }
-                light = PooledByteBufAllocator.DEFAULT.buffer(FastLightDataWriter.estimateLightDataSize(chunk), LIGHT_MAX_BUFFER);
+                FastLightDataWriter.PreparedLight preparedLight = FastLightDataWriter.prepareLightData(chunk);
+                light = PooledByteBufAllocator.DEFAULT.buffer(preparedLight.size(), LIGHT_MAX_BUFFER);
                 FriendlyByteBuf lightOut = new FriendlyByteBuf(light);
-                FastLightDataWriter.writeLightData(lightOut, chunk);
+                FastLightDataWriter.writeLightData(lightOut, preparedLight);
                 this.lightPayloadCacheService.put(worldId, chunkKey, light);
             }
 

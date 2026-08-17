@@ -25,9 +25,9 @@ import java.util.List;
 public final class PaperFarPlayerBackend implements FarPlayerBackend {
 
     @Override
-    public Object createSpawnPacket(FarPlayerState state) {
+    public Object createSpawnPacket(int entityId, FarPlayerState state) {
         return new ClientboundAddEntityPacket(
-            state.entityId(),
+            entityId,
             state.uuid(),
             state.x(),
             state.y(),
@@ -42,9 +42,9 @@ public final class PaperFarPlayerBackend implements FarPlayerBackend {
     }
 
     @Override
-    public Object createMovePacket(FarPlayerState state) {
+    public Object createMovePacket(int entityId, FarPlayerState state) {
         return new ClientboundTeleportEntityPacket(
-            state.entityId(),
+            entityId,
             new PositionMoveRotation(
                 new Vec3(state.x(), state.y(), state.z()),
                 Vec3.ZERO,
@@ -71,15 +71,18 @@ public final class PaperFarPlayerBackend implements FarPlayerBackend {
         return new ClientboundSetEntityDataPacket(entityId, metadata);
     }
 
+    // The packet has no public (entityId, headYaw) constructor, so it must be
+    // decoded from bytes. Reuse a tiny per-thread buffer instead of allocating a
+    // fresh ByteBuf + FriendlyByteBuf wrapper per tracked player per move tick.
+    private static final ThreadLocal<FriendlyByteBuf> ROTATE_HEAD_BUF =
+        ThreadLocal.withInitial(() -> new FriendlyByteBuf(Unpooled.buffer(8)));
+
     @Override
     public Object createRotateHeadPacket(int entityId, float headYaw) {
-        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
+        FriendlyByteBuf buf = ROTATE_HEAD_BUF.get();
+        buf.clear();
         buf.writeVarInt(entityId);
         buf.writeByte((byte) (headYaw * 256.0F / 360.0F));
-        try {
-            return ClientboundRotateHeadPacket.STREAM_CODEC.decode(buf);
-        } finally {
-            buf.release();
-        }
+        return ClientboundRotateHeadPacket.STREAM_CODEC.decode(buf);
     }
 }

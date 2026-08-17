@@ -131,8 +131,7 @@ public final class FarPlayerTrackingService {
         FarPlayerState state,
         int farEntityId
     ) {
-        FarPlayerState packetState = this.withEntityId(state, farEntityId);
-        if (!this.channelInjectionService.writeBypass(channel, this.backend.createSpawnPacket(packetState))) {
+        if (!this.channelInjectionService.writeBypass(channel, this.backend.createSpawnPacket(farEntityId, state))) {
             return;
         }
 
@@ -150,8 +149,7 @@ public final class FarPlayerTrackingService {
 
     private void moveAndSync(Channel channel, int trackedEntityId, FarPlayerState state, boolean syncMove, boolean syncEquip) {
         if (syncMove) {
-            FarPlayerState packetState = this.withEntityId(state, trackedEntityId);
-            this.channelInjectionService.writeBypass(channel, this.backend.createMovePacket(packetState));
+            this.channelInjectionService.writeBypass(channel, this.backend.createMovePacket(trackedEntityId, state));
             this.channelInjectionService.writeBypass(channel, this.backend.createRotateHeadPacket(trackedEntityId, state.headYaw()));
 
             if (state.metadata() != null && !state.metadata().isEmpty()) {
@@ -212,24 +210,5 @@ public final class FarPlayerTrackingService {
         return ALLOCATION_FAILED;
     }
 
-
-    private FarPlayerState withEntityId(FarPlayerState state, int entityId) {
-        if (state.entityId() == entityId) {
-            return state;
-        }
-        return new FarPlayerState(
-            entityId,
-            state.uuid(),
-            state.worldId(),
-            state.x(),
-            state.y(),
-            state.z(),
-            state.yaw(),
-            state.pitch(),
-            state.headYaw(),
-            state.equipment(),
-            state.metadata()
-        );
-    }
 
 }

@@ -2,6 +2,7 @@ package me.mapacheee.extendedhorizons.fakechunks.backend;
 
 import ca.spottedleaf.moonrise.patches.starlight.light.SWMRNibbleArray;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import me.mapacheee.extendedhorizons.fakechunks.antixray.VarIntUtil;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -12,6 +13,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 final class FastLightDataWriter {
 
@@ -23,6 +26,8 @@ final class FastLightDataWriter {
         FULL_BRIGHT = new byte[FULL_BRIGHT_ARRAY_BYTES];
         Arrays.fill(FULL_BRIGHT, (byte) 0xFF);
     }
+
+    private static final Map<Integer, byte[]> SYNTHETIC_LIGHT_CACHE = new ConcurrentHashMap<>();
 
     private static final MethodHandle GET_STORAGE_VISIBLE = createStorageVisibleHandle();
 
@@ -38,22 +43,53 @@ final class FastLightDataWriter {
     private FastLightDataWriter() {
     }
 
-    static int estimateLightDataSize(LevelChunk chunk) {
+    static PreparedLight prepareLightData(LevelChunk chunk) {
         byte[][] blockLight = java.util.Objects.requireNonNull(convertStarlightToBytes(chunk.starlight$getBlockNibbles(), false));
         byte[][] skyLight = convertStarlightToBytes(chunk.starlight$getSkyNibbles(), true);
+
         if (skyLight == null) {
-            return estimateNoSkyLightSize(blockLight);
+            List<byte[]> blockData = new ArrayList<>(blockLight.length);
+            NoSkyMasks masks = buildNoSkyMasks(blockLight, blockData);
+            long[] notBlockEmpty = masks.notBlockEmpty().toLongArray();
+            long[] blockEmpty = masks.blockEmpty().toLongArray();
+            int size = NO_SKY_HEADER_BYTES
+                + estimateBitSet(notBlockEmpty)
+                + estimateBitSet(blockEmpty)
+                + estimateByteArrayList(blockData);
+            return new PreparedLight(false, null, notBlockEmpty, null, blockEmpty, null, blockData, size);
         }
 
         LightMasks masks = buildMasks(blockLight, skyLight);
-        int size = 0;
-        size += estimateBitSet(masks.notSkyEmpty.toLongArray());
-        size += estimateBitSet(masks.notBlockEmpty.toLongArray());
-        size += estimateBitSet(masks.skyEmpty.toLongArray());
-        size += estimateBitSet(masks.blockEmpty.toLongArray());
-        size += estimateByteArrayList(masks.skyData);
-        size += estimateByteArrayList(masks.blockData);
-        return size;
+        long[] notSkyEmpty = masks.notSkyEmpty().toLongArray();
+        long[] notBlockEmpty = masks.notBlockEmpty().toLongArray();
+        long[] skyEmpty = masks.skyEmpty().toLongArray();
+        long[] blockEmpty = masks.blockEmpty().toLongArray();
+        int size = estimateBitSet(notSkyEmpty)
+            + estimateBitSet(notBlockEmpty)
+            + estimateBitSet(skyEmpty)
+            + estimateBitSet(blockEmpty)
+            + estimateByteArrayList(masks.skyData())
+            + estimateByteArrayList(masks.blockData());
+        return new PreparedLight(true, notSkyEmpty, notBlockEmpty, skyEmpty, blockEmpty, masks.skyData(), masks.blockData(), size);
+    }
+
+    static void writeLightData(FriendlyByteBuf out, PreparedLight prepared) {
+        if (!prepared.hasSky()) {
+            out.writeByte(0);
+            writeBitSet(out, prepared.notBlockEmpty());
+            out.writeByte(0);
+            writeBitSet(out, prepared.blockEmpty());
+            out.writeByte(0);
+            writeByteArrayList(out, prepared.blockData());
+            return;
+        }
+
+        writeBitSet(out, prepared.notSkyEmpty());
+        writeBitSet(out, prepared.notBlockEmpty());
+        writeBitSet(out, prepared.skyEmpty());
+        writeBitSet(out, prepared.blockEmpty());
+        writeByteArrayList(out, prepared.skyData());
+        writeByteArrayList(out, prepared.blockData());
     }
 
     static boolean hasInitialisedLight(LevelChunk chunk) {
@@ -81,62 +117,60 @@ final class FastLightDataWriter {
         boolean hasSky = chunk.starlight$getSkyNibbles() != null;
         int sectionCount = blockNibbles != null ? blockNibbles.length : chunk.getSectionsCount() + EXTRA_LIGHT_SECTIONS;
 
-        if (hasSky) {
-            BitSet notSkyEmpty = new BitSet(sectionCount);
-            notSkyEmpty.set(0, sectionCount);
-            BitSet notBlockEmpty = new BitSet(sectionCount);
-            BitSet skyEmpty = new BitSet(sectionCount);
-            BitSet blockEmpty = new BitSet(sectionCount);
-            blockEmpty.set(0, sectionCount);
-
-            writeBitSet(out, notSkyEmpty.toLongArray());
-            writeBitSet(out, notBlockEmpty.toLongArray());
-            writeBitSet(out, skyEmpty.toLongArray());
-            writeBitSet(out, blockEmpty.toLongArray());
-
-            VarIntUtil.writeVarInt(out, sectionCount);
-            for (int i = 0; i < sectionCount; i++) {
-                FriendlyByteBuf.writeByteArray(out, FULL_BRIGHT);
-            }
-            out.writeByte(0);
-        } else {
-            BitSet notSkyEmpty = new BitSet(sectionCount);
-            BitSet notBlockEmpty = new BitSet(sectionCount);
-            notBlockEmpty.set(0, sectionCount);
-            BitSet skyEmpty = new BitSet(sectionCount);
-            skyEmpty.set(0, sectionCount);
-            BitSet blockEmpty = new BitSet(sectionCount);
-
-            writeBitSet(out, notSkyEmpty.toLongArray());
-            writeBitSet(out, notBlockEmpty.toLongArray());
-            writeBitSet(out, skyEmpty.toLongArray());
-            writeBitSet(out, blockEmpty.toLongArray());
-
-            out.writeByte(0);
-            VarIntUtil.writeVarInt(out, sectionCount);
-            for (int i = 0; i < sectionCount; i++) {
-                FriendlyByteBuf.writeByteArray(out, FULL_BRIGHT);
-            }
-        }
+        int cacheKey = (sectionCount << 1) | (hasSky ? 1 : 0);
+        byte[] payload = SYNTHETIC_LIGHT_CACHE.computeIfAbsent(cacheKey, key -> buildSyntheticLightPayload(sectionCount, hasSky));
+        out.writeBytes(payload);
     }
 
-    static void writeLightData(FriendlyByteBuf out, LevelChunk chunk) {
-        byte[][] blockLight = java.util.Objects.requireNonNull(convertStarlightToBytes(chunk.starlight$getBlockNibbles(), false));
-        byte[][] skyLight = convertStarlightToBytes(chunk.starlight$getSkyNibbles(), true);
+    private static byte[] buildSyntheticLightPayload(int sectionCount, boolean hasSky) {
+        ByteBuf scratch = Unpooled.buffer(sectionCount * (FULL_BRIGHT_ARRAY_BYTES + 3) + 64);
+        try {
+            if (hasSky) {
+                BitSet notSkyEmpty = new BitSet(sectionCount);
+                notSkyEmpty.set(0, sectionCount);
+                BitSet notBlockEmpty = new BitSet(sectionCount);
+                BitSet skyEmpty = new BitSet(sectionCount);
+                BitSet blockEmpty = new BitSet(sectionCount);
+                blockEmpty.set(0, sectionCount);
 
-        if (skyLight == null) {
-            writeNoSkyLightData(out, blockLight);
-            return;
+                writeBitSet(scratch, notSkyEmpty.toLongArray());
+                writeBitSet(scratch, notBlockEmpty.toLongArray());
+                writeBitSet(scratch, skyEmpty.toLongArray());
+                writeBitSet(scratch, blockEmpty.toLongArray());
+
+                VarIntUtil.writeVarInt(scratch, sectionCount);
+                for (int i = 0; i < sectionCount; i++) {
+                    VarIntUtil.writeVarInt(scratch, FULL_BRIGHT_ARRAY_BYTES);
+                    scratch.writeBytes(FULL_BRIGHT);
+                }
+                scratch.writeByte(0);
+            } else {
+                BitSet notSkyEmpty = new BitSet(sectionCount);
+                BitSet notBlockEmpty = new BitSet(sectionCount);
+                notBlockEmpty.set(0, sectionCount);
+                BitSet skyEmpty = new BitSet(sectionCount);
+                skyEmpty.set(0, sectionCount);
+                BitSet blockEmpty = new BitSet(sectionCount);
+
+                writeBitSet(scratch, notSkyEmpty.toLongArray());
+                writeBitSet(scratch, notBlockEmpty.toLongArray());
+                writeBitSet(scratch, skyEmpty.toLongArray());
+                writeBitSet(scratch, blockEmpty.toLongArray());
+
+                scratch.writeByte(0);
+                VarIntUtil.writeVarInt(scratch, sectionCount);
+                for (int i = 0; i < sectionCount; i++) {
+                    VarIntUtil.writeVarInt(scratch, FULL_BRIGHT_ARRAY_BYTES);
+                    scratch.writeBytes(FULL_BRIGHT);
+                }
+            }
+
+            byte[] payload = new byte[scratch.readableBytes()];
+            scratch.readBytes(payload);
+            return payload;
+        } finally {
+            scratch.release();
         }
-
-        LightMasks masks = buildMasks(blockLight, skyLight);
-
-        writeBitSet(out, masks.notSkyEmpty.toLongArray());
-        writeBitSet(out, masks.notBlockEmpty.toLongArray());
-        writeBitSet(out, masks.skyEmpty.toLongArray());
-        writeBitSet(out, masks.blockEmpty.toLongArray());
-        writeByteArrayList(out, masks.skyData);
-        writeByteArrayList(out, masks.blockData);
     }
 
     private static byte[][] convertStarlightToBytes(SWMRNibbleArray[] layers, boolean allowEmpty) {
@@ -157,34 +191,10 @@ final class FastLightDataWriter {
         }
     }
 
-    private static void writeNoSkyLightData(ByteBuf out, byte[][] blockLight) {
-        List<byte[]> blockData = new ArrayList<>(blockLight.length);
-        NoSkyMasks masks = buildNoSkyMasks(blockLight, blockData);
-
-        out.writeByte(0);
-        writeBitSet(out, masks.notBlockEmpty().toLongArray());
-        out.writeByte(0);
-        writeBitSet(out, masks.blockEmpty().toLongArray());
-        out.writeByte(0);
-        writeByteArrayList(out, blockData);
-    }
-
-    private static int estimateNoSkyLightSize(byte[][] blockLight) {
-        NoSkyMasks masks = buildNoSkyMasks(blockLight, null);
-
-        int size = NO_SKY_HEADER_BYTES;
-        size += estimateBitSet(masks.notBlockEmpty().toLongArray());
-        size += estimateBitSet(masks.blockEmpty().toLongArray());
-        size += varIntSize(masks.blockDataCount()) + masks.blockDataBytes();
-        return size;
-    }
-
     private static NoSkyMasks buildNoSkyMasks(byte[][] blockLight, List<byte[]> blockDataOut) {
         int sectionCount = blockLight.length;
         BitSet notBlockEmpty = new BitSet(sectionCount);
         BitSet blockEmpty = new BitSet(sectionCount);
-        int blockDataCount = 0;
-        int blockDataBytes = 0;
 
         for (int indexY = 0; indexY < sectionCount; indexY++) {
             byte[] block = blockLight[indexY];
@@ -193,14 +203,10 @@ final class FastLightDataWriter {
                 continue;
             }
             notBlockEmpty.set(indexY);
-            blockDataCount++;
-            blockDataBytes += varIntSize(block.length) + block.length;
-            if (blockDataOut != null) {
-                blockDataOut.add(block);
-            }
+            blockDataOut.add(block);
         }
 
-        return new NoSkyMasks(notBlockEmpty, blockEmpty, blockDataCount, blockDataBytes);
+        return new NoSkyMasks(notBlockEmpty, blockEmpty);
     }
 
     private static LightMasks buildMasks(byte[][] blockLight, byte[][] skyLight) {
@@ -281,6 +287,17 @@ final class FastLightDataWriter {
         return 5;
     }
 
+    record PreparedLight(
+        boolean hasSky,
+        long[] notSkyEmpty,
+        long[] notBlockEmpty,
+        long[] skyEmpty,
+        long[] blockEmpty,
+        List<byte[]> skyData,
+        List<byte[]> blockData,
+        int size
+    ) {}
+
     private record LightMasks(
         List<byte[]> skyData,
         BitSet notSkyEmpty,
@@ -292,10 +309,6 @@ final class FastLightDataWriter {
 
     private record NoSkyMasks(
         BitSet notBlockEmpty,
-        BitSet blockEmpty,
-        int blockDataCount,
-        int blockDataBytes
+        BitSet blockEmpty
     ) {}
 }
-
-

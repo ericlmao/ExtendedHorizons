@@ -81,6 +81,13 @@ public final class InternalWorldEditListener {
         private final BulkChunkInvalidationService bulkService;
         private final Set<Long> pendingChunks = new HashSet<>();
 
+        /**
+         * Blocks arrive with strong spatial locality (WE iterates column/chunk
+         * order), so remembering the last packed key skips the boxing +
+         * HashSet probe for ~99% of setBlock calls.
+         */
+        private long lastChunkKey = Long.MIN_VALUE;
+
         InvalidationExtent(Extent extent, UUID worldId, BulkChunkInvalidationService bulkService) {
             super(extent);
             this.worldId = worldId;
@@ -91,10 +98,7 @@ public final class InternalWorldEditListener {
         public <T extends BlockStateHolder<T>> boolean setBlock(BlockVector3 location, T block) throws WorldEditException {
             boolean changed = super.setBlock(location, block);
             if (changed) {
-                this.pendingChunks.add(ChunkKeyCodec.pack(location.x() >> 4, location.z() >> 4));
-                if (this.pendingChunks.size() >= FLUSH_THRESHOLD) {
-                    this.flush();
-                }
+                this.recordChunk(ChunkKeyCodec.pack(location.x() >> 4, location.z() >> 4));
             }
             return changed;
         }
@@ -103,12 +107,20 @@ public final class InternalWorldEditListener {
         public <T extends BlockStateHolder<T>> boolean setBlock(int x, int y, int z, T block) throws WorldEditException {
             boolean changed = super.setBlock(x, y, z, block);
             if (changed) {
-                this.pendingChunks.add(ChunkKeyCodec.pack(x >> 4, z >> 4));
-                if (this.pendingChunks.size() >= FLUSH_THRESHOLD) {
-                    this.flush();
-                }
+                this.recordChunk(ChunkKeyCodec.pack(x >> 4, z >> 4));
             }
             return changed;
+        }
+
+        private void recordChunk(long chunkKey) {
+            if (chunkKey == this.lastChunkKey) {
+                return;
+            }
+            this.lastChunkKey = chunkKey;
+            this.pendingChunks.add(chunkKey);
+            if (this.pendingChunks.size() >= FLUSH_THRESHOLD) {
+                this.flush();
+            }
         }
 
         @Override

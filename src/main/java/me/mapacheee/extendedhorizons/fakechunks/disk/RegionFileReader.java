@@ -109,30 +109,34 @@ public final class RegionFileReader {
         int regionX = chunkX >> REGION_COORD_SHIFT;
         int regionZ = chunkZ >> REGION_COORD_SHIFT;
 
-        File regionFolder = new File(worldFolder, "region");
-        File regionFile = new File(regionFolder, "r." + regionX + "." + regionZ + ".mca");
-
-        if (!regionFile.exists()) {
-            LOGGER.debug("Region file does not exist: {}", regionFile.getAbsolutePath());
-            return null;
-        }
+        // One string key; on the (dominant) cached-channel path this skips the
+        // two File allocations and the exists() stat syscall entirely.
+        String cacheKey = worldFolder.getPath() + File.separatorChar + "region" + File.separatorChar
+            + "r." + regionX + "." + regionZ + ".mca";
 
         int localX = chunkX & REGION_LOCAL_MASK;
         int localZ = chunkZ & REGION_LOCAL_MASK;
         int locationIndex = (localX + localZ * REGION_DIMENSION) * LOCATION_ENTRY_SIZE;
 
-        FileChannel channel;
-        try {
-            channel = CHANNEL_CACHE.get(regionFile.getAbsolutePath(), path -> {
-                try {
-                    return FileChannel.open(regionFile.toPath(), StandardOpenOption.READ);
-                } catch (IOException e) {
-                    LOGGER.error("Failed to open FileChannel for region file {}: {}", path, e.getMessage());
-                    return null;
-                }
-            });
-        } catch (Exception e) {
-            channel = null;
+        FileChannel channel = CHANNEL_CACHE.getIfPresent(cacheKey);
+        if (channel == null) {
+            File regionFile = new File(cacheKey);
+            if (!regionFile.exists()) {
+                LOGGER.debug("Region file does not exist: {}", cacheKey);
+                return null;
+            }
+            try {
+                channel = CHANNEL_CACHE.get(cacheKey, path -> {
+                    try {
+                        return FileChannel.open(regionFile.toPath(), StandardOpenOption.READ);
+                    } catch (IOException e) {
+                        LOGGER.error("Failed to open FileChannel for region file {}: {}", path, e.getMessage());
+                        return null;
+                    }
+                });
+            } catch (Exception e) {
+                channel = null;
+            }
         }
 
         if (channel == null) {
@@ -143,7 +147,7 @@ public final class RegionFileReader {
             long fileLength = channel.size();
             if (fileLength < HEADER_SIZE) {
                 LOGGER.warn("Region file is too small ({} bytes), expected at least {} bytes: {}",
-                    fileLength, HEADER_SIZE, regionFile.getAbsolutePath());
+                    fileLength, HEADER_SIZE, cacheKey);
                 return null;
             }
 
@@ -164,14 +168,14 @@ public final class RegionFileReader {
 
             if (sectorOffset < MIN_SECTOR_OFFSET) {
                 LOGGER.warn("Invalid sector offset {} for chunk [{}, {}] in {}",
-                    sectorOffset, chunkX, chunkZ, regionFile.getName());
+                    sectorOffset, chunkX, chunkZ, cacheKey);
                 return null;
             }
 
             long dataStart = (long) sectorOffset * SECTOR_SIZE;
             if (dataStart >= fileLength) {
                 LOGGER.warn("Sector offset {} points beyond file end ({} bytes) for chunk [{}, {}] in {}",
-                    sectorOffset, fileLength, chunkX, chunkZ, regionFile.getName());
+                    sectorOffset, fileLength, chunkX, chunkZ, cacheKey);
                 return null;
             }
 
@@ -187,33 +191,40 @@ public final class RegionFileReader {
 
             if (dataLength <= 0) {
                 LOGGER.warn("Invalid data length {} for chunk [{}, {}] in {}",
-                    dataLength, chunkX, chunkZ, regionFile.getName());
+                    dataLength, chunkX, chunkZ, cacheKey);
                 return null;
             }
 
             int compressedLength = dataLength - 1;
             if (compressedLength <= 0) {
                 LOGGER.warn("Compressed payload length is {} for chunk [{}, {}] in {}",
-                    compressedLength, chunkX, chunkZ, regionFile.getName());
+                    compressedLength, chunkX, chunkZ, cacheKey);
                 return null;
             }
 
             ByteBuffer dataBuf = ByteBuffer.allocate(compressedLength);
-            int dataRead = channel.read(dataBuf, dataStart + CHUNK_HEADER_BYTES);
-            if (dataRead < compressedLength) {
+            long payloadStart = dataStart + CHUNK_HEADER_BYTES;
+            while (dataBuf.hasRemaining()) {
+                // A single read() may legally return fewer bytes than requested.
+                int n = channel.read(dataBuf, payloadStart + dataBuf.position());
+                if (n < 0) {
+                    break;
+                }
+            }
+            if (dataBuf.hasRemaining()) {
                 LOGGER.warn("Compressed payload read truncated for chunk [{}, {}] in {}",
-                    chunkX, chunkZ, regionFile.getName());
+                    chunkX, chunkZ, cacheKey);
                 return null;
             }
 
             byte[] compressedData = dataBuf.array();
-            return decompress(compressedData, compressionType, sectorCount, chunkX, chunkZ, regionFile.getName());
+            return decompress(compressedData, compressionType, sectorCount, chunkX, chunkZ, cacheKey);
         } catch (java.nio.channels.ClosedChannelException e) {
-            CHANNEL_CACHE.invalidate(regionFile.getAbsolutePath());
-            LOGGER.debug("FileChannel closed for {}, invalidating cache", regionFile.getName());
+            CHANNEL_CACHE.invalidate(cacheKey);
+            LOGGER.debug("FileChannel closed for {}, invalidating cache", cacheKey);
             return null;
         } catch (IOException e) {
-            CHANNEL_CACHE.invalidate(regionFile.getAbsolutePath());
+            CHANNEL_CACHE.invalidate(cacheKey);
             LOGGER.error("Failed to read chunk [{}, {}] from FileChannel: {}", chunkX, chunkZ, e.getMessage());
             return null;
         }
