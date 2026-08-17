@@ -12,7 +12,8 @@ import java.util.Map;
 public record EhConfig(
     DebugConfig debug,
     @Setting("fake-chunks") FakeChunksConfig fakeChunks,
-    @Setting("world-settings") Map<String, WorldSettingsConfig> worldSettings
+    @Setting("world-settings") Map<String, WorldSettingsConfig> worldSettings,
+    @Setting("welcome-enabled") boolean welcomeEnabled
 ) {
 
     private static final int MIN_VIEW_DISTANCE = 2;
@@ -74,7 +75,7 @@ public record EhConfig(
     );
 
     public static EhConfig empty() {
-        return new EhConfig(null, null, null);
+        return new EhConfig(null, null, null, true);
     }
 
     public boolean debugEnabled() {
@@ -154,6 +155,13 @@ public record EhConfig(
         }
         int configured = this.fakeChunks.serializationWorkers();
         return Math.clamp(configured, DEFAULT_SERIALIZATION_WORKERS, MAX_SERIALIZATION_WORKERS);
+    }
+
+    public boolean worldEditEnabled() {
+        if (this.fakeChunks == null || this.fakeChunks.worldEdit() == null) {
+            return true;
+        }
+      return this.fakeChunks.worldEdit().enabled();
     }
 
     public int maxGlobalGenerationsPerTick() {
@@ -333,13 +341,19 @@ public record EhConfig(
         CacheConfig cache,
         RuntimeConfig runtime,
         @Setting("far-players") FarPlayersConfig farPlayers,
-        @Setting("afk-pause") AfkPauseConfig afkPause
+        @Setting("afk-pause") AfkPauseConfig afkPause,
+        @Setting("worldedit") WorldEditConfig worldEdit
     ) {}
 
     @ConfigSerializable
     public record AfkPauseConfig(
         Boolean enabled,
         @Setting("timeout-seconds") int timeoutSeconds
+    ) {}
+
+    @ConfigSerializable
+    public record WorldEditConfig(
+        boolean enabled
     ) {}
 
     @ConfigSerializable

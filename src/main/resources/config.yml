@@ -84,6 +84,12 @@ fake-chunks:
     # Seconds of complete stillness before a player is considered AFK (minimum 30).
     timeout-seconds: 300
 
+  worldedit:
+    # Enables/disables the WorldEdit / FAWE integration hook.
+    # When enabled, chunks modified by WorldEdit are invalidated
+    # so fake chunks show the updated blocks.
+    enabled: true
+
   cache:
     # Serialized fake chunk cache TTL.
     ttl-seconds: 10
@@ -97,6 +103,9 @@ fake-chunks:
     permission-cache-ttl-seconds: 5
     # Max entries in far player cache (player states and equipment).
     far-player-cache-entries: 150
+
+# Enables the welcome message sent to players on join.
+welcome-enabled: true
 
 # Per-world overrides.
 world-settings:

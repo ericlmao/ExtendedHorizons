@@ -1,7 +1,9 @@
 package me.mapacheee.extendedhorizons.hooks.worldedit;
 
 import com.google.inject.Inject;
+import com.thewinterframework.configurate.Container;
 import com.thewinterframework.paper.listener.ListenerComponent;
+import me.mapacheee.extendedhorizons.config.EhConfig;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -16,7 +18,6 @@ import org.bukkit.event.server.ServerCommandEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Set;
 import java.util.UUID;
 
 @ListenerComponent
@@ -24,54 +25,28 @@ public final class CommandInvalidationListener implements Listener {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CommandInvalidationListener.class);
 
-    private static final Set<String> WORLDEDIT_COMMANDS = Set.of(
-        "//set", "//replace", "//walls", "//faces", "//overlay", "//stack",
-        "//move", "//smooth", "//regen", "//deform", "//hollow",
-        "//flora", "//naturalize", "//line", "//curve",
-        "//paste", "//rotate", "//flip",
-        "//drain", "//fixwater", "//fixlava", "//snow", "//thaw",
-        "//green", "//forest", "//undo", "//redo", "//cut", "//clear",
-        "/undo", "/redo",
-        "/worldedit:set", "/worldedit:replace", "/worldedit:paste", "/worldedit:undo", "/worldedit:redo"
-    );
-
     private final BulkChunkInvalidationService bulkChunkInvalidationService;
-    private final WorldEditInvalidationListener worldEditInvalidationListener;
+    private final Container<EhConfig> configContainer;
 
     @Inject
     public CommandInvalidationListener(
         BulkChunkInvalidationService bulkChunkInvalidationService,
-        WorldEditInvalidationListener worldEditInvalidationListener
+        Container<EhConfig> configContainer
     ) {
         this.bulkChunkInvalidationService = bulkChunkInvalidationService;
-        this.worldEditInvalidationListener = worldEditInvalidationListener;
+        this.configContainer = configContainer;
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
-        String message = event.getMessage();
-        String lowerCmd = message.toLowerCase();
-
-        if (this.isWorldEditCommand(lowerCmd)) {
-            this.worldEditInvalidationListener.invalidatePlayerSelection(event.getPlayer());
-            return;
-        }
-
-        this.handleVanillaCommand(event.getPlayer(), message);
+        if (!this.configContainer.get().worldEditEnabled()) return;
+        this.handleVanillaCommand(event.getPlayer(), event.getMessage());
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onServerCommand(ServerCommandEvent event) {
+        if (!this.configContainer.get().worldEditEnabled()) return;
         this.handleVanillaCommand(event.getSender(), "/" + event.getCommand());
-    }
-
-    private boolean isWorldEditCommand(String lowerCmd) {
-        for (String cmd : WORLDEDIT_COMMANDS) {
-            if (lowerCmd.startsWith(cmd + " ") || lowerCmd.equals(cmd)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private void handleVanillaCommand(CommandSender sender, String commandLine) {

@@ -142,7 +142,9 @@ public final class PaperChunkBackend implements ChunkBackend {
             }
         };
 
-        if (this.configContainer.get().diskReaderEnabled()) {
+        boolean chunkLoaded = world.isChunkLoaded(chunkX, chunkZ);
+        boolean useDiskReader = this.configContainer.get().diskReaderEnabled() && !chunkLoaded;
+        if (useDiskReader) {
             this.serializationExecutorService.submit(() -> DiskChunkReader.readAndSerialize(world, chunkX, chunkZ))
                 .whenComplete((diskPayload, throwable) -> {
                     if (diskPayload != null) {
@@ -158,6 +160,9 @@ public final class PaperChunkBackend implements ChunkBackend {
                     }
                 });
         } else {
+            if (this.configContainer.get().debugEnabled() && chunkLoaded) {
+                LOGGER.info("EH chunk [{}, {}] is loaded in memory, using live data", chunkX, chunkZ);
+            }
             fallbackLoad.run();
         }
 
