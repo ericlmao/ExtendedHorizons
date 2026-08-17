@@ -7,14 +7,23 @@ import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket;
 
 import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 final class PacketIdSnifferHandler extends ChannelOutboundHandlerAdapter {
 
     private static final String[] PACKET_ID_METHODS = {"packetId", "id", "getId"};
+    private static final Map<Class<?>, Optional<Method>> PACKET_ID_METHOD_CACHE = new ConcurrentHashMap<>();
 
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         resolveFromPacket(msg);
+        // Self-remove once both IDs are known so the per-packet hop does not
+        // stay in the pipeline for the connection's whole lifetime.
+        if (PacketIdRegistry.hasLevelChunkWithLightId() && PacketIdRegistry.hasChunkCacheRadiusId()) {
+            ctx.pipeline().remove(this);
+        }
         super.write(ctx, msg, promise);
     }
 
@@ -38,19 +47,31 @@ final class PacketIdSnifferHandler extends ChannelOutboundHandlerAdapter {
     }
 
     private static int extractPacketId(Object packet) {
-        Class<?> clazz = packet.getClass();
+        Optional<Method> lookup = PACKET_ID_METHOD_CACHE.computeIfAbsent(
+            packet.getClass(), PacketIdSnifferHandler::findPacketIdMethod);
+        if (lookup.isEmpty()) {
+            return -1;
+        }
+        try {
+            Object result = lookup.get().invoke(packet);
+            if (result instanceof Number num) {
+                return num.intValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    private static Optional<Method> findPacketIdMethod(Class<?> clazz) {
         for (String methodName : PACKET_ID_METHODS) {
             try {
                 Method method = clazz.getMethod(methodName);
                 if (method.getReturnType() == int.class || method.getReturnType() == Integer.class) {
-                    Object result = method.invoke(packet);
-                    if (result instanceof Number num) {
-                        return num.intValue();
-                    }
+                    return Optional.of(method);
                 }
             } catch (Throwable ignored) {
             }
         }
-        return -1;
+        return Optional.empty();
     }
 }

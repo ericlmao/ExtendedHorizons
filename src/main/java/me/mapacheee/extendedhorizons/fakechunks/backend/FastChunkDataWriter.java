@@ -1,7 +1,5 @@
 package me.mapacheee.extendedhorizons.fakechunks.backend;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.PooledByteBufAllocator;
 import me.mapacheee.extendedhorizons.fakechunks.antixray.VarIntUtil;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.VarInt;
@@ -9,9 +7,6 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 
 final class FastChunkDataWriter {
-
-    private static final int SECTION_BUFFER_INITIAL = 1024;
-    private static final int SECTION_BUFFER_MAX = 256 * 1024;
 
     private FastChunkDataWriter() {}
 
@@ -39,17 +34,14 @@ final class FastChunkDataWriter {
     static void writeChunkData(FriendlyByteBuf out, LevelChunk chunk) {
         writeHeightmaps(out, chunk);
 
-        ByteBuf sectionBuffer = PooledByteBufAllocator.DEFAULT.buffer(SECTION_BUFFER_INITIAL, SECTION_BUFFER_MAX);
-        try {
-            FriendlyByteBuf sectionBuf = new FriendlyByteBuf(sectionBuffer);
-            for (LevelChunkSection section : chunk.getSections()) {
-                section.write(sectionBuf, null, 0);
-            }
-            int sectionBytes = sectionBuffer.readableBytes();
-            VarIntUtil.writeVarInt(out, sectionBytes);
-            out.writeBytes(sectionBuffer, sectionBuffer.readerIndex(), sectionBytes);
-        } finally {
-            sectionBuffer.release();
+        LevelChunkSection[] sections = chunk.getSections();
+        int sectionsSize = 0;
+        for (LevelChunkSection section : sections) {
+            sectionsSize += Math.max(0, section.getSerializedSize());
+        }
+        VarIntUtil.writeVarInt(out, sectionsSize);
+        for (LevelChunkSection section : sections) {
+            section.write(out, null, 0);
         }
 
         VarIntUtil.writeVarInt(out, 0);

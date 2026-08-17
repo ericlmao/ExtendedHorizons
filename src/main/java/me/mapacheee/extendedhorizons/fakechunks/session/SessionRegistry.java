@@ -17,6 +17,10 @@ public final class SessionRegistry {
     public PlayerSession ensureFor(Player player, boolean bumpEpoch) {
         UUID playerId = player.getUniqueId();
         UUID worldId = player.getWorld().getUID();
+        PlayerSession existing = this.sessions.get(playerId);
+        if (existing != null && !bumpEpoch && worldId.equals(existing.worldId())) {
+            return existing;
+        }
         return this.sessions.compute(playerId, (id, current) -> {
             if (current == null) {
                 current = new PlayerSession(id, worldId);

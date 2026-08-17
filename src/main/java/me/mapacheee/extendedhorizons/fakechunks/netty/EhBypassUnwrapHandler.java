@@ -20,6 +20,8 @@ import io.netty.channel.ChannelHandler.Sharable;
 @Sharable
 public final class EhBypassUnwrapHandler extends ChannelOutboundHandlerAdapter {
 
+    public static final EhBypassUnwrapHandler INSTANCE = new EhBypassUnwrapHandler();
+
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         if (msg instanceof EhBypassPacket bypass) {

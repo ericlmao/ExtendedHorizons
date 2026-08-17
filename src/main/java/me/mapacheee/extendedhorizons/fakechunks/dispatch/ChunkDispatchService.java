@@ -84,12 +84,15 @@ public final class ChunkDispatchService {
             );
         }
 
+        // ConcurrentLinkedDeque.size() is O(n); count once and track locally
+        // instead of re-walking the queue every loop iteration.
+        int queueSize = session.chunkQueue().size();
         while (true) {
             if (inFlight >= maxInflight) { break; }
-            if (session.chunkQueue().size() >= maxQueueSize) { break; }
+            if (queueSize >= maxQueueSize) { break; }
             if (!this.generationLimiterService.tryAcquire()) { break; }
-            Long chunkKey = session.pollNextChunkKey();
-            if (chunkKey == null) {
+            long chunkKey = session.pollNextChunkKey();
+            if (chunkKey == PlayerSession.NO_CHUNK) {
                 this.generationLimiterService.release();
                 break;
             }
@@ -101,6 +104,7 @@ public final class ChunkDispatchService {
             }
             session.chunkQueue().addLast(new ChunkSendQueueEntry(chunkKey, buildFuture));
             inFlight++;
+            queueSize++;
             if (--chunksPerTick <= 0) { break; }
         }
     }

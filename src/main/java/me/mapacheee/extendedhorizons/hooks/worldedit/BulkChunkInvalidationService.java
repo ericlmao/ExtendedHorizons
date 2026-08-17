@@ -38,7 +38,11 @@ public final class BulkChunkInvalidationService {
     private final ChannelInjectionService channelInjectionService;
     private final ChunkDispatchService dispatchService;
     private final ConcurrentHashMap<UUID, Set<Long>> pendingInvalidations = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Long, Long> cooldownMap = new ConcurrentHashMap<>();
+
+    // Cooldowns are tracked per world: the old folded long key
+    // (worldId.hashCode() * 31 + chunkKey) collided across worlds and across
+    // chunks, wrongly suppressing invalidations for unrelated chunks.
+    private final ConcurrentHashMap<UUID, ConcurrentHashMap<Long, Long>> cooldownMap = new ConcurrentHashMap<>();
 
     private final List<Long> unloadBuffer = new ArrayList<>();
 
@@ -82,8 +86,7 @@ public final class BulkChunkInvalidationService {
 
     public void queueInvalidation(UUID worldId, long chunkKey) {
         if (worldId == null) return;
-        long compositeKey = compositeKey(worldId, chunkKey);
-        if (isOnCooldown(compositeKey)) return;
+        if (isOnCooldown(worldId, chunkKey)) return;
         this.pendingInvalidations.computeIfAbsent(worldId, k -> ConcurrentHashMap.newKeySet()).add(chunkKey);
     }
 
@@ -91,8 +94,7 @@ public final class BulkChunkInvalidationService {
         if (worldId == null || chunkKeys == null || chunkKeys.isEmpty()) return;
         Set<Long> set = this.pendingInvalidations.computeIfAbsent(worldId, k -> ConcurrentHashMap.newKeySet());
         for (Long key : chunkKeys) {
-            long compositeKey = compositeKey(worldId, key);
-            if (!isOnCooldown(compositeKey)) {
+            if (!isOnCooldown(worldId, key)) {
                 set.add(key);
             }
         }
@@ -124,9 +126,10 @@ public final class BulkChunkInvalidationService {
             final int count = idx;
 
             long now = System.nanoTime();
+            ConcurrentHashMap<Long, Long> worldCooldowns =
+                this.cooldownMap.computeIfAbsent(worldId, k -> new ConcurrentHashMap<>());
             for (int i = 0; i < count; i++) {
-                long compositeKey = compositeKey(worldId, keyArray[i]);
-                this.cooldownMap.put(compositeKey, now);
+                worldCooldowns.put(keyArray[i], now);
                 this.cacheService.invalidate(worldId, keyArray[i]);
                 this.antiXrayPayloadCacheService.invalidateChunk(worldId, keyArray[i]);
                 this.lightPayloadCacheService.invalidate(worldId, keyArray[i]);
@@ -169,20 +172,22 @@ public final class BulkChunkInvalidationService {
         evictExpiredCooldowns();
     }
 
-    private boolean isOnCooldown(long compositeKey) {
-        Long lastTime = this.cooldownMap.get(compositeKey);
+    private boolean isOnCooldown(UUID worldId, long chunkKey) {
+        ConcurrentHashMap<Long, Long> worldCooldowns = this.cooldownMap.get(worldId);
+        if (worldCooldowns == null) {
+            return false;
+        }
+        Long lastTime = worldCooldowns.get(chunkKey);
         return lastTime != null && (System.nanoTime() - lastTime) < COOLDOWN_NANOS;
     }
 
     private void evictExpiredCooldowns() {
         long now = System.nanoTime();
-        if (this.cooldownMap.size() > 10_000) {
-            this.cooldownMap.entrySet().removeIf(e -> (now - e.getValue()) >= COOLDOWN_NANOS);
+        for (ConcurrentHashMap<Long, Long> worldCooldowns : this.cooldownMap.values()) {
+            if (worldCooldowns.size() > 2_048) {
+                worldCooldowns.entrySet().removeIf(e -> (now - e.getValue()) >= COOLDOWN_NANOS);
+            }
         }
-    }
-
-    private static long compositeKey(UUID worldId, long chunkKey) {
-        return worldId.hashCode() * 31L + chunkKey;
     }
 }
 

@@ -61,7 +61,7 @@ public final class ChannelInjectionService {
                     ? "craftengine_encoder"
                     : "encoder";
                 if (channel.pipeline().get(anchor) != null) {
-                    channel.pipeline().addBefore(anchor, EH_BYPASS_UNWRAP_HANDLER, new EhBypassUnwrapHandler());
+                    channel.pipeline().addBefore(anchor, EH_BYPASS_UNWRAP_HANDLER, EhBypassUnwrapHandler.INSTANCE);
                 }
             }
             this.trackInjectedChannel(channel);
@@ -125,16 +125,16 @@ public final class ChannelInjectionService {
                 ReferenceCountUtil.release(payload);
                 return;
             }
-            ChannelPromise promise = channel.newPromise();
-            promise.addListener(future -> {
-                if (!future.isSuccess()) {
-                    ReferenceCountUtil.release(payload);
-                }
-            });
+            // Ownership of the payload transfers to Netty as soon as write() is
+            // invoked: downstream encoders release the input themselves on both
+            // success and failure. Releasing again from a failure listener double
+            // releases a pooled buffer, which can corrupt data on any connection
+            // that recycled the same pool chunk. Release here only when write()
+            // was never issued.
             try {
-                channel.write(new EhBypassPacket(payload), promise);
+                channel.write(new EhBypassPacket(payload), channel.voidPromise());
             } catch (Throwable throwable) {
-                promise.tryFailure(throwable);
+                ReferenceCountUtil.release(payload);
             }
         };
         if (!this.runOnEventLoop(channel, action)) {
@@ -247,6 +247,9 @@ public final class ChannelInjectionService {
         }
         if (channel.pipeline().get(EH_PACKET_ID_PROBE_HANDLER) != null) {
             channel.pipeline().remove(EH_PACKET_ID_PROBE_HANDLER);
+        }
+        if (channel.pipeline().get(EH_PACKET_SNIFFER) != null) {
+            channel.pipeline().remove(EH_PACKET_SNIFFER);
         }
     }
 }

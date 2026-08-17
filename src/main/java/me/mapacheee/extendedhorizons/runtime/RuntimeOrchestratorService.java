@@ -167,7 +167,7 @@ public final class RuntimeOrchestratorService {
                                     ItemStack item = nmsPlayer.getItemBySlot(slot);
                                     equipment.add(Pair.of(slot, item.copy()));
                                 }
-                                this.lastEquipment.put(player.getUniqueId(), new ArrayList<>(equipment));
+                                this.lastEquipment.put(player.getUniqueId(), equipment);
                                 this.farPlayerCacheService.updateEquipment(player.getUniqueId(), equipment);
                             } else {
                                 equipment = prevEquipment;
@@ -222,6 +222,15 @@ public final class RuntimeOrchestratorService {
                 );
             }
         }
+    }
+
+    /**
+     * Drops per-player state held by this service. Must be called on quit:
+     * lastEquipment retains copied NMS ItemStacks (potentially large NBT) and
+     * otherwise grows monotonically with every player who ever joined.
+     */
+    public void removePlayer(UUID playerId) {
+        this.lastEquipment.remove(playerId);
     }
 
     private void cancelTask() {

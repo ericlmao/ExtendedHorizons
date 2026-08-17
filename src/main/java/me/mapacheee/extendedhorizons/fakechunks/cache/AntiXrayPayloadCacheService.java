@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,11 +29,12 @@ public final class AntiXrayPayloadCacheService {
     private static final int PROFILE_HASH_DIVISOR = 4;
     private static final int MIN_CACHE_ENTRIES = 128;
     private static final int MIN_PROFILE_ENTRIES = 64;
+    private static final int AVERAGE_PAYLOAD_WEIGHT_BYTES = 64 * 1024;
 
     private final Container<EhConfig> configContainer;
     private volatile Cache<AntiXrayPayloadKey, ByteBuf> cache;
     private volatile Cache<UUID, ProfileHashEntry> profileHashCache;
-    private final Map<Long, List<AntiXrayPayloadKey>> chunkIndex = new ConcurrentHashMap<>();
+    private final Map<ChunkRef, Set<AntiXrayPayloadKey>> chunkIndex = new ConcurrentHashMap<>();
 
     @Inject
     public AntiXrayPayloadCacheService(Container<EhConfig> configContainer) {
@@ -48,9 +50,18 @@ public final class AntiXrayPayloadCacheService {
         Cache<UUID, ProfileHashEntry> oldProfileHashCache = this.profileHashCache;
 
         this.cache = Caffeine.newBuilder()
-            .maximumSize(maxEntries)
+            .maximumWeight((long) maxEntries * AVERAGE_PAYLOAD_WEIGHT_BYTES)
+            .weigher((AntiXrayPayloadKey key, ByteBuf value) -> Math.max(1, value.readableBytes()))
             .expireAfterWrite(Duration.ofSeconds(ttlSeconds))
-            .removalListener((AntiXrayPayloadKey key, ByteBuf value, RemovalCause cause) -> ReferenceCountUtil.release(value))
+            .removalListener((AntiXrayPayloadKey key, ByteBuf value, RemovalCause cause) -> {
+                ReferenceCountUtil.release(value);
+                if (key != null) {
+                    this.chunkIndex.computeIfPresent(new ChunkRef(key.worldId(), key.chunkKey()), (ref, keys) -> {
+                        keys.remove(key);
+                        return keys.isEmpty() ? null : keys;
+                    });
+                }
+            })
             .build();
 
         this.profileHashCache = Caffeine.newBuilder()
@@ -105,10 +116,7 @@ public final class AntiXrayPayloadCacheService {
             return null;
         }
         ByteBuf payload = this.cache.getIfPresent(new AntiXrayPayloadKey(worldId, chunkKey, profileHash, serializerMode, FORMAT_VERSION));
-        if (payload == null || !payload.isReadable()) {
-            return null;
-        }
-        return payload.retainedDuplicate();
+        return CacheBufUtil.retainReadableOrNull(payload);
     }
 
     public void put(UUID worldId, long chunkKey, String profileHash, EhConfig.SerializerMode serializerMode, ByteBuf payload) {
@@ -116,26 +124,20 @@ public final class AntiXrayPayloadCacheService {
             return;
         }
         AntiXrayPayloadKey key = new AntiXrayPayloadKey(worldId, chunkKey, profileHash, serializerMode, FORMAT_VERSION);
+        this.chunkIndex.computeIfAbsent(new ChunkRef(worldId, chunkKey), k -> ConcurrentHashMap.newKeySet()).add(key);
         this.cache.put(key, payload.retainedDuplicate());
-        long compositeKey = compositeKey(worldId, chunkKey);
-        this.chunkIndex.computeIfAbsent(compositeKey, k -> new ArrayList<>()).add(key);
     }
 
     public void invalidateChunk(UUID worldId, long chunkKey) {
         if (worldId == null) {
             return;
         }
-        long compositeKey = compositeKey(worldId, chunkKey);
-        List<AntiXrayPayloadKey> keys = this.chunkIndex.remove(compositeKey);
+        Set<AntiXrayPayloadKey> keys = this.chunkIndex.remove(new ChunkRef(worldId, chunkKey));
         if (keys != null) {
             for (AntiXrayPayloadKey key : keys) {
                 this.cache.invalidate(key);
             }
         }
-    }
-
-    private static long compositeKey(UUID worldId, long chunkKey) {
-        return worldId.hashCode() * 31L + chunkKey;
     }
 
     public void cleanUp() {
@@ -168,6 +170,8 @@ public final class AntiXrayPayloadCacheService {
         List<String> hiddenBlocks,
         String profileHash
     ) {}
+
+    private record ChunkRef(UUID worldId, long chunkKey) {}
 
     private static void drainCache(Cache<?, ?> cache) {
         if (cache == null) {

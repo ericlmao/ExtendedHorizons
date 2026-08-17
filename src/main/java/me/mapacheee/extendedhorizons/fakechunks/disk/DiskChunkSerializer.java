@@ -160,7 +160,16 @@ public final class DiskChunkSerializer {
             byte[][] blockLight, byte[][] skyLight,
             ServerLevel level
     ) {
-        ByteBuf raw = PooledByteBufAllocator.DEFAULT.buffer(MIN_PACKET_SIZE, MAX_PACKET_BUFFER);
+        // Size the buffer from the known section payload plus a light-data bound;
+        // starting at MIN_PACKET_SIZE forced several reallocate-and-copy grows for
+        // every disk-read chunk (payloads are typically tens of KB).
+        int sectionsSize = 0;
+        for (LevelChunkSection section : sections) {
+            sectionsSize += Math.max(0, section.getSerializedSize());
+        }
+        int lightEstimate = 64 + blockLight.length * 2 * (2048 + 8);
+        int initialCapacity = Math.clamp((long) MIN_PACKET_SIZE + sectionsSize + lightEstimate, MIN_PACKET_SIZE, MAX_PACKET_BUFFER);
+        ByteBuf raw = PooledByteBufAllocator.DEFAULT.buffer(initialCapacity, MAX_PACKET_BUFFER);
         try {
             VarInt.write(raw, PacketIdRegistry.getLevelChunkWithLightId());
             raw.writeInt(chunkX);

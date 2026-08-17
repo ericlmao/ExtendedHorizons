@@ -19,6 +19,7 @@ public final class LightPayloadCacheService {
 
     private static final int MAX_ENTRIES_DIVISOR = 2;
     private static final int MIN_CACHE_ENTRIES = 128;
+    private static final int AVERAGE_PAYLOAD_WEIGHT_BYTES = 32 * 1024;
 
     private final Container<EhConfig> configContainer;
     private volatile Cache<LightChunkKey, ByteBuf> cache;
@@ -35,7 +36,8 @@ public final class LightPayloadCacheService {
         Cache<LightChunkKey, ByteBuf> oldCache = this.cache;
 
         this.cache = Caffeine.newBuilder()
-            .maximumSize(maxEntries)
+            .maximumWeight((long) maxEntries * AVERAGE_PAYLOAD_WEIGHT_BYTES)
+            .weigher((LightChunkKey key, ByteBuf value) -> Math.max(1, value.readableBytes()))
             .expireAfterWrite(Duration.ofSeconds(ttlSeconds))
             .removalListener((LightChunkKey key, ByteBuf value, RemovalCause cause) -> ReferenceCountUtil.release(value))
             .build();
@@ -48,10 +50,7 @@ public final class LightPayloadCacheService {
             return null;
         }
         ByteBuf payload = this.cache.getIfPresent(new LightChunkKey(worldId, chunkKey));
-        if (payload == null || !payload.isReadable()) {
-            return null;
-        }
-        return payload.retainedDuplicate();
+        return CacheBufUtil.retainReadableOrNull(payload);
     }
 
     public void put(UUID worldId, long chunkKey, ByteBuf payload) {

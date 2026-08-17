@@ -12,6 +12,12 @@ public final class AntiXrayProcessor {
     private static final int STORAGE_SIZE_2D = 1 << (STORAGE_BITS * 2);
     private static final int STORAGE_SIZE_3D = 1 << (STORAGE_BITS * 3);
 
+    // Palette storage never exceeds 4 values per long word (>= 16 bits per entry would
+    // exceed the global palette bit width), so 4096 / 4 = 1024 words is the ceiling.
+    private static final int MAX_SCRATCH_WORDS = STORAGE_SIZE_3D / 4;
+    private static final ThreadLocal<long[]> READ_SCRATCH = ThreadLocal.withInitial(() -> new long[MAX_SCRATCH_WORDS]);
+    private static final ThreadLocal<long[]> REMAP_SCRATCH = ThreadLocal.withInitial(() -> new long[MAX_SCRATCH_WORDS]);
+
     private final ReplacementStrategy strategy;
     private final ReplacementPresets presets;
     private final boolean[] obfuscatedStates;
@@ -201,7 +207,7 @@ public final class AntiXrayProcessor {
                     throw new IllegalStateException("Invalid zero-sized storage length");
                 }
             }
-            return new StorageState(storageReaderIndex, 0L, 0, 0, EMPTY_LONG_ARRAY);
+            return new StorageState(storageReaderIndex, 0L, 0, 0, EMPTY_LONG_ARRAY, 0);
         }
 
         long entryMask = (1L << paletteStorageBits) - 1L;
@@ -215,11 +221,11 @@ public final class AntiXrayProcessor {
             }
         }
 
-        long[] storage = new long[wordCount];
+        long[] storage = wordCount <= MAX_SCRATCH_WORDS ? READ_SCRATCH.get() : new long[wordCount];
         for (int i = 0; i < wordCount; i++) {
             storage[i] = buf.readLong();
         }
-        return new StorageState(storageReaderIndex, entryMask, valuesPerWord, valuesPerWordShift, storage);
+        return new StorageState(storageReaderIndex, entryMask, valuesPerWord, valuesPerWordShift, storage, wordCount);
     }
 
     private RemappedStorage remapStorage(PaletteState paletteState, StorageState storageState) {
@@ -227,16 +233,23 @@ public final class AntiXrayProcessor {
         int newValuesPerWord;
         int newValuesPerWordShift;
         long[] newStorage;
+        int newWordCount;
 
         if (!resize) {
             newValuesPerWord = storageState.valuesPerWord();
             newValuesPerWordShift = storageState.valuesPerWordShift();
             newStorage = storageState.storage();
+            newWordCount = storageState.wordCount();
         } else {
             newValuesPerWord = Long.SIZE / paletteState.newPaletteBits();
             newValuesPerWordShift = Integer.numberOfTrailingZeros(newValuesPerWord);
-            int newWordCount = (STORAGE_SIZE_3D + newValuesPerWord - 1) / newValuesPerWord;
-            newStorage = new long[newWordCount];
+            newWordCount = (STORAGE_SIZE_3D + newValuesPerWord - 1) / newValuesPerWord;
+            if (newWordCount <= MAX_SCRATCH_WORDS) {
+                newStorage = REMAP_SCRATCH.get();
+                Arrays.fill(newStorage, 0, newWordCount, 0L);
+            } else {
+                newStorage = new long[newWordCount];
+            }
         }
 
         int srcValuesPerWord = storageState.valuesPerWord();
@@ -288,7 +301,7 @@ public final class AntiXrayProcessor {
             }
         }
 
-        return new RemappedStorage(newStorage, resize);
+        return new RemappedStorage(newStorage, newWordCount, resize);
     }
 
     private void writeProcessedStorage(
@@ -321,10 +334,12 @@ public final class AntiXrayProcessor {
         }
 
         if (storageLength) {
-            VarIntUtil.writeVarInt(buf, remapped.newStorage().length);
+            VarIntUtil.writeVarInt(buf, remapped.wordCount());
         }
-        for (long word : remapped.newStorage()) {
-            buf.writeLong(word);
+        long[] newStorage = remapped.newStorage();
+        int wordCount = remapped.wordCount();
+        for (int i = 0; i < wordCount; i++) {
+            buf.writeLong(newStorage[i]);
         }
     }
 
@@ -349,10 +364,11 @@ public final class AntiXrayProcessor {
         long entryMask,
         int valuesPerWord,
         int valuesPerWordShift,
-        long[] storage
+        long[] storage,
+        int wordCount
     ) {}
 
-    private record RemappedStorage(long[] newStorage, boolean resize) {}
+    private record RemappedStorage(long[] newStorage, int wordCount, boolean resize) {}
 
     private boolean isObfuscatedState(int state) {
         return state >= 0 && state < this.obfuscatedStates.length && this.obfuscatedStates[state];

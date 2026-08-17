@@ -17,6 +17,9 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class PlayerSession {
 
     private static final long[] EMPTY_LONG_ARRAY = new long[0];
+
+    /** Sentinel for {@link #pollNextChunkKey()}: no real chunk packs to this value. */
+    public static final long NO_CHUNK = Long.MIN_VALUE;
     private static final ChunkState DUMMY_STATE = new ChunkState();
     private static final double DIRECTION_CHANGE_THRESHOLD = 0.8d;
     private static final double DIRECTION_WEIGHT = 0.3d;
@@ -39,6 +42,7 @@ public final class PlayerSession {
     private volatile boolean enabled;
     private volatile boolean initiated;
     private volatile long[] chunksInDistance = EMPTY_LONG_ARRAY;
+    private long[] directionalScratch;
     private volatile ChunkState[] chunkStates = new ChunkState[0];
     private volatile int lastAdvertisedDistance = OVERRIDE_DISTANCE_UNSET;
     private volatile long lastAdvertisedChunkKey = ChunkKeyCodec.pack(Integer.MIN_VALUE, Integer.MIN_VALUE);
@@ -442,7 +446,12 @@ public final class PlayerSession {
         return false;
     }
 
-    public Long pollNextChunkKey() {
+    /**
+     * Returns the next chunk key to build, or {@link #NO_CHUNK} when the
+     * iteration is exhausted. Primitive return avoids boxing a Long per
+     * admitted chunk per player per tick.
+     */
+    public long pollNextChunkKey() {
         int centerX = ChunkKeyCodec.x(this.chunkKey);
         int centerZ = ChunkKeyCodec.z(this.chunkKey);
         long[] offsets = this.chunksInDistance;
@@ -466,7 +475,7 @@ public final class PlayerSession {
                 return ChunkKeyCodec.pack(chunkX, chunkZ);
             }
         }
-        return null;
+        return NO_CHUNK;
     }
 
     public void onChunkBuildFailed(long chunkKey) {
@@ -597,35 +606,37 @@ public final class PlayerSession {
         double dirX = this.moveDirX;
         double dirZ = this.moveDirZ;
 
-        int[] indices = new int[len];
-        double[] keys = new double[len];
+        // Pack a quantized sort key into the high 43 bits and the base index into
+        // the low 21 bits, then use the O(n log n) primitive sort. The previous
+        // insertion sort was O(n^2) over ~pi*d^2 entries and ran on the Netty
+        // event loop on every significant direction change.
+        long[] packed = this.directionalScratch;
+        if (packed == null || packed.length < len) {
+            packed = new long[len];
+            this.directionalScratch = packed;
+        }
         for (int i = 0; i < len; i++) {
-            indices[i] = i;
             int ox = ChunkKeyCodec.x(base[i]);
             int oz = ChunkKeyCodec.z(base[i]);
             double dist = Math.sqrt(ox * ox + oz * oz);
+            double key;
             if (dist <= 0) {
-                keys[i] = -1.0d;
+                key = -1.0d;
             } else {
                 double alignment = (ox * dirX + oz * dirZ) / dist;
-                keys[i] = dist * (1.0d - DIRECTION_WEIGHT * alignment);
+                key = dist * (1.0d - DIRECTION_WEIGHT * alignment);
             }
+            // Keys span roughly [-1, 2 * MAX_CHUNK_DISTANCE]; shift positive and
+            // quantize to 1/4096 chunk so ordering survives the pack losslessly
+            // for practical purposes.
+            long quantized = (long) ((key + 2.0d) * 4096.0d);
+            packed[i] = (quantized << 21) | i;
         }
-
-        for (int i = 1; i < len; i++) {
-            int current = indices[i];
-            double currentKey = keys[current];
-            int j = i - 1;
-            while (j >= 0 && keys[indices[j]] > currentKey) {
-                indices[j + 1] = indices[j];
-                j--;
-            }
-            indices[j + 1] = current;
-        }
+        java.util.Arrays.sort(packed, 0, len);
 
         long[] sorted = new long[len];
         for (int i = 0; i < len; i++) {
-            sorted[i] = base[indices[i]];
+            sorted[i] = base[(int) (packed[i] & 0x1FFFFF)];
         }
         this.chunksInDistance = sorted;
         this.iterationIndex = 0;
@@ -654,8 +665,9 @@ public final class PlayerSession {
     }
 
     private void purgeQueuedChunk(int chunkX, int chunkZ) {
+        long target = ChunkKeyCodec.pack(chunkX, chunkZ);
         this.chunkQueue.removeIf(entry -> {
-            if (entry.chunkKey() == ChunkKeyCodec.pack(chunkX, chunkZ)) {
+            if (entry.chunkKey() == target) {
                 entry.releaseFuture();
                 return true;
             }
