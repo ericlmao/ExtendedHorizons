@@ -13,29 +13,40 @@ import java.util.function.Consumer;
 public final class SessionRegistry {
 
     private final Map<UUID, PlayerSession> sessions = new ConcurrentHashMap<>();
+    private volatile boolean stopping;
 
     public PlayerSession ensureFor(Player player, boolean bumpEpoch) {
         UUID playerId = player.getUniqueId();
         UUID worldId = player.getWorld().getUID();
+        if (this.stopping) {
+            return closedSession(playerId, worldId);
+        }
         PlayerSession existing = this.sessions.get(playerId);
-        if (existing != null && !bumpEpoch && worldId.equals(existing.worldId())) {
+        if (existing != null && !bumpEpoch && !existing.closed() && worldId.equals(existing.worldId())) {
             return existing;
         }
-        return this.sessions.compute(playerId, (id, current) -> {
-            if (current == null) {
+        PlayerSession result = this.sessions.compute(playerId, (id, current) -> {
+            if (this.stopping) {
+                if (current != null) {
+                    current.close();
+                }
+                return null;
+            }
+            if (current == null || current.closed()) {
                 current = new PlayerSession(id, worldId);
                 current.bumpEpoch();
                 return current;
             }
-            boolean worldChanged = !worldId.equals(current.worldId());
-            current.setWorld(worldId);
-            if (worldChanged || bumpEpoch) {
-                current.bumpEpoch();
-                current.clearDispatchState();
-                current.handleDimensionReset();
+            synchronized (current) {
+                boolean worldChanged = !worldId.equals(current.worldId());
+                current.setWorld(worldId);
+                if (worldChanged || bumpEpoch) {
+                    current.handleDimensionReset();
+                }
             }
             return current;
         });
+        return result == null ? closedSession(playerId, worldId) : result;
     }
 
     public void forEachSession(Consumer<PlayerSession> action) {
@@ -49,13 +60,21 @@ public final class SessionRegistry {
     public void remove(UUID playerId) {
         PlayerSession removed = this.sessions.remove(playerId);
         if (removed != null) {
-            removed.clearDispatchState();
+            removed.close();
         }
     }
 
     @OnDisable
     public void onDisable() {
-        this.sessions.values().forEach(PlayerSession::clearDispatchState);
+        this.stopping = true;
+        this.sessions.values().forEach(PlayerSession::close);
         this.sessions.clear();
     }
+
+    private static PlayerSession closedSession(UUID playerId, UUID worldId) {
+        PlayerSession session = new PlayerSession(playerId, worldId);
+        session.close();
+        return session;
+    }
 }
+

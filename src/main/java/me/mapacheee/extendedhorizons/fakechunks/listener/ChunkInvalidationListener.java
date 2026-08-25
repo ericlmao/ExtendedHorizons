@@ -76,6 +76,11 @@ public final class ChunkInvalidationListener implements Listener {
         this.chunkBuildCacheService.invalidate(worldId, chunkKey);
         this.antiXrayPayloadCacheService.invalidateChunk(worldId, chunkKey);
         this.lightPayloadCacheService.invalidate(worldId, chunkKey);
+        this.sessionRegistry.forEachSession(session -> {
+            if (worldId.equals(session.worldId())) {
+                session.invalidatePendingChunk(chunkKey);
+            }
+        });
     }
 
     private void broadcastBlockChange(Block block, BlockData blockData) {
@@ -93,7 +98,7 @@ public final class ChunkInvalidationListener implements Listener {
             if (!worldId.equals(session.worldId())) {
                 return;
             }
-            if (session.isEhLoaded(chunkKey)) {
+            if (session.shouldReceiveBlockUpdate(chunkKey)) {
                 Player player = Bukkit.getPlayer(session.playerId());
                 if (player != null) {
                     Channel channel = this.channelInjectionService.resolveChannel(player);
