@@ -1,20 +1,28 @@
 package me.mapacheee.extendedhorizons.fakechunks.netty;
 
-import com.thewinterframework.service.annotation.lifecycle.OnDisable;
 import com.thewinterframework.service.annotation.Service;
+import com.thewinterframework.service.annotation.lifecycle.OnDisable;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.EventLoop;
 import io.netty.channel.ChannelPromise;
 import io.netty.util.ReferenceCountUtil;
 import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
+import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
+import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
+import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.ChunkPos;
 import org.bukkit.Bukkit;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 
-import java.util.HashSet;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public final class ChannelInjectionService {
@@ -22,19 +30,27 @@ public final class ChannelInjectionService {
     public static final String EH_HANDLER = "eh_packet_handler";
     public static final String EH_PACKET_ID_PROBE_HANDLER = "eh_packet_id_probe";
     public static final String EH_PACKET_SNIFFER = "eh_packet_sniffer";
-    public static final String EH_BYPASS_UNWRAP_HANDLER = "eh_bypass_unwrap";
-    private final Set<Channel> injectedChannels = ConcurrentHashMap.newKeySet();
+    private static final int SHUTDOWN_WAIT_SECONDS = 5;
+
+    private volatile boolean stopping;
 
     public void inject(Player player) {
         this.inject(player, null);
     }
 
     public void inject(Player player, PlayerSession session) {
+        if (this.stopping) {
+            return;
+        }
         Channel channel = this.resolveChannel(player);
         if (channel == null || !channel.isActive()) {
             return;
         }
         Runnable action = () -> {
+            if (this.stopping) {
+                removeHandlers(channel);
+                return;
+            }
             if (needsPacketIdProbe()
                 && channel.pipeline().get(EH_PACKET_SNIFFER) == null) {
                 channel.pipeline().addLast(EH_PACKET_SNIFFER, new PacketIdSnifferHandler());
@@ -46,7 +62,6 @@ public final class ChannelInjectionService {
             }
             if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
                 handler.setSession(session);
-                this.trackInjectedChannel(channel);
                 removePacketIdProbeIfResolved(channel);
                 return;
             }
@@ -56,15 +71,6 @@ public final class ChannelInjectionService {
             EhPacketHandler handler = new EhPacketHandler();
             handler.setSession(session);
             channel.pipeline().addBefore("packet_handler", EH_HANDLER, handler);
-            if (channel.pipeline().get(EH_BYPASS_UNWRAP_HANDLER) == null) {
-                String anchor = channel.pipeline().get("craftengine_encoder") != null
-                    ? "craftengine_encoder"
-                    : "encoder";
-                if (channel.pipeline().get(anchor) != null) {
-                    channel.pipeline().addBefore(anchor, EH_BYPASS_UNWRAP_HANDLER, EhBypassUnwrapHandler.INSTANCE);
-                }
-            }
-            this.trackInjectedChannel(channel);
             PacketIdRegistry.resolveFromEncoder(channel);
             removePacketIdProbeIfResolved(channel);
         };
@@ -72,37 +78,58 @@ public final class ChannelInjectionService {
     }
 
     public void uninject(Player player) {
-        this.uninject(this.resolveChannel(player));
-    }
-
-    private void uninject(Channel channel) {
-        if (channel == null) {
-            return;
-        }
-        this.injectedChannels.remove(channel);
-        Runnable action = () -> {
-            if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
-                handler.setSession(null);
-                channel.pipeline().remove(EH_HANDLER);
-            }
-            if (channel.pipeline().get(EH_PACKET_ID_PROBE_HANDLER) != null) {
-                channel.pipeline().remove(EH_PACKET_ID_PROBE_HANDLER);
-            }
-            if (channel.pipeline().get(EH_PACKET_SNIFFER) != null) {
-                channel.pipeline().remove(EH_PACKET_SNIFFER);
-            }
-            if (channel.pipeline().get(EH_BYPASS_UNWRAP_HANDLER) != null) {
-                channel.pipeline().remove(EH_BYPASS_UNWRAP_HANDLER);
-            }
-        };
-        this.runOnEventLoop(channel, action);
-    }
-
-    public void bindSession(Channel channel, PlayerSession session) {
+        Channel channel = this.resolveChannel(player);
         if (channel == null || !channel.isActive()) {
             return;
         }
+        this.runOnEventLoop(channel, () -> removeHandlers(channel));
+    }
+
+    @OnDisable
+    public void onDisable() {
+        this.stopping = true;
+        List<Channel> channels = new ArrayList<>();
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            Channel channel = this.resolveChannel(player);
+            if (channel != null && channel.isActive()) {
+                channels.add(channel);
+            }
+        }
+        CountDownLatch removed = new CountDownLatch(channels.size());
+        for (Channel channel : channels) {
+            try {
+                this.runOnEventLoop(channel, () -> {
+                    try {
+                        restoreClientState(channel);
+                    } finally {
+                        try {
+                            channel.flush();
+                        } finally {
+                            removeHandlers(channel);
+                            removed.countDown();
+                        }
+                    }
+                });
+            } catch (RuntimeException exception) {
+                removed.countDown();
+            }
+        }
+        try {
+            removed.await(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public void bindSession(Channel channel, PlayerSession session) {
+        if (this.stopping || channel == null || !channel.isActive()) {
+            return;
+        }
         Runnable action = () -> {
+            if (this.stopping) {
+                removeHandlers(channel);
+                return;
+            }
             if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
                 handler.setSession(session);
             }
@@ -116,55 +143,87 @@ public final class ChannelInjectionService {
     }
 
     public boolean writeBypass(Channel channel, Object payload) {
-        if (channel == null || !channel.isActive()) {
-            ReferenceCountUtil.release(payload);
-            return false;
-        }
-        Runnable action = () -> {
-            if (!channel.isActive()) {
-                ReferenceCountUtil.release(payload);
-                return;
-            }
-            // Ownership of the payload transfers to Netty as soon as write() is
-            // invoked: downstream encoders release the input themselves on both
-            // success and failure. Releasing again from a failure listener double
-            // releases a pooled buffer, which can corrupt data on any connection
-            // that recycled the same pool chunk. Release here only when write()
-            // was never issued.
-            try {
-                channel.write(new EhBypassPacket(payload), channel.voidPromise());
-            } catch (Throwable throwable) {
-                ReferenceCountUtil.release(payload);
-            }
-        };
-        if (!this.runOnEventLoop(channel, action)) {
-            ReferenceCountUtil.release(payload);
-            return false;
-        }
-        return true;
+        ChannelPromise promise = this.writeBypassFuture(channel, payload);
+        return promise != null && (!promise.isDone() || promise.isSuccess());
     }
 
+    /** Consumes reference-counted payloads on every rejected write path. */
     public ChannelPromise writeBypassFuture(Channel channel, Object payload) {
-        if (channel == null || !channel.isActive()) {
+        if (payload == null) {
+            return null;
+        }
+        if (channel == null) {
+            ReferenceCountUtil.release(payload);
             return null;
         }
         ChannelPromise promise = channel.newPromise();
+        if (this.stopping || !channel.isActive()) {
+            ReferenceCountUtil.release(payload);
+            promise.tryFailure(new IllegalStateException("Channel inactive"));
+            return promise;
+        }
         Runnable action = () -> {
-            if (!channel.isActive()) {
+            if (this.stopping || !channel.isActive()) {
+                ReferenceCountUtil.release(payload);
+                promise.tryFailure(new IllegalStateException("Channel inactive"));
+                return;
+            }
+            ChannelHandlerContext context = channel.pipeline().context(EH_HANDLER);
+            try {
+                if (context == null) {
+                    channel.write(payload, promise);
+                } else {
+                    context.write(payload, promise);
+                }
+            } catch (RuntimeException | Error throwable) {
+                ReferenceCountUtil.release(payload);
+                promise.tryFailure(throwable);
+            }
+        };
+        try {
+            this.runOnEventLoop(channel, action);
+        } catch (RuntimeException exception) {
+            ReferenceCountUtil.release(payload);
+            promise.tryFailure(exception);
+        }
+        return promise;
+    }
+
+    /**
+     * Consumes one owned encoded buffer reference on every return path.
+     */
+    public ChannelPromise writeEncodedFuture(Channel channel, ByteBuf payload) {
+        if (payload == null) {
+            return null;
+        }
+        if (channel == null) {
+            ReferenceCountUtil.release(payload);
+            return null;
+        }
+        ChannelPromise promise = channel.newPromise();
+        if (this.stopping || !channel.isActive()) {
+            ReferenceCountUtil.release(payload);
+            promise.tryFailure(new IllegalStateException("Channel inactive"));
+            return promise;
+        }
+        Runnable action = () -> {
+            if (this.stopping || !channel.isActive()) {
                 ReferenceCountUtil.release(payload);
                 promise.tryFailure(new IllegalStateException("Channel inactive"));
                 return;
             }
             try {
-                channel.write(new EhBypassPacket(payload), promise);
-            } catch (Throwable throwable) {
+                channel.write(payload, promise);
+            } catch (RuntimeException | Error throwable) {
                 ReferenceCountUtil.release(payload);
                 promise.tryFailure(throwable);
             }
         };
-        if (!this.runOnEventLoop(channel, action)) {
+        try {
+            this.runOnEventLoop(channel, action);
+        } catch (RuntimeException exception) {
             ReferenceCountUtil.release(payload);
-            promise.tryFailure(new IllegalStateException("Channel event loop unavailable"));
+            promise.tryFailure(exception);
         }
         return promise;
     }
@@ -175,14 +234,14 @@ public final class ChannelInjectionService {
     }
 
     public void flush(Channel channel) {
-        if (channel == null || !channel.isActive()) {
+        if (this.stopping || channel == null || !channel.isActive()) {
             return;
         }
         this.runOnEventLoop(channel, channel::flush);
     }
 
     public void executeOnEventLoop(Channel channel, Runnable runnable) {
-        if (channel == null || !channel.isActive() || runnable == null) {
+        if (this.stopping || channel == null || !channel.isActive() || runnable == null) {
             return;
         }
         this.runOnEventLoop(channel, runnable);
@@ -199,42 +258,53 @@ public final class ChannelInjectionService {
         return serverPlayer.connection.connection.channel;
     }
 
-    @OnDisable
-    public void onDisable() {
-        Set<Channel> channels = new HashSet<>(this.injectedChannels);
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            Channel channel = this.resolveChannel(player);
-            if (channel != null) {
-                channels.add(channel);
-            }
-        }
-        for (Channel channel : channels) {
-            this.uninject(channel);
-        }
-        this.injectedChannels.clear();
-    }
-
-    private boolean runOnEventLoop(Channel channel, Runnable action) {
-        if (channel == null || action == null) {
-            return false;
-        }
+    private void runOnEventLoop(Channel channel, Runnable action) {
         EventLoop eventLoop = channel.eventLoop();
         if (eventLoop.inEventLoop()) {
             action.run();
-            return true;
+            return;
         }
-        try {
-            eventLoop.execute(action);
-            return true;
-        } catch (RuntimeException exception) {
-            return false;
+        eventLoop.execute(action);
+    }
+
+    private static void removeHandlers(Channel channel) {
+        if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
+            handler.setSession(null);
+            channel.pipeline().remove(EH_HANDLER);
+        }
+        if (channel.pipeline().get(EH_PACKET_ID_PROBE_HANDLER) != null) {
+            channel.pipeline().remove(EH_PACKET_ID_PROBE_HANDLER);
+        }
+        if (channel.pipeline().get(EH_PACKET_SNIFFER) != null) {
+            channel.pipeline().remove(EH_PACKET_SNIFFER);
         }
     }
 
-    private void trackInjectedChannel(Channel channel) {
-        if (this.injectedChannels.add(channel)) {
-            channel.closeFuture().addListener(future -> this.injectedChannels.remove(channel));
+    private static void restoreClientState(Channel channel) {
+        if (!(channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler)) {
+            return;
         }
+        PlayerSession session = handler.session();
+        ChannelHandlerContext context = channel.pipeline().context(EH_HANDLER);
+        if (session == null || context == null) {
+            return;
+        }
+        for (int entityId : session.trackedFarPlayers().values()) {
+            context.write(new ClientboundRemoveEntitiesPacket(entityId));
+        }
+        session.trackedFarPlayers().clear();
+        for (long chunkKey : session.loadedBvChunkKeys()) {
+            context.write(new ClientboundForgetLevelChunkPacket(new ChunkPos(
+                ChunkKeyCodec.x(chunkKey),
+                ChunkKeyCodec.z(chunkKey)
+            )));
+        }
+        int serverViewDistance = session.serverViewDistance();
+        if (serverViewDistance > 0) {
+            context.write(new ClientboundSetChunkCacheRadiusPacket(serverViewDistance));
+        }
+        session.unloadEhChunks();
+        session.clearDispatchState();
     }
 
     private static boolean needsPacketIdProbe() {
@@ -247,9 +317,6 @@ public final class ChannelInjectionService {
         }
         if (channel.pipeline().get(EH_PACKET_ID_PROBE_HANDLER) != null) {
             channel.pipeline().remove(EH_PACKET_ID_PROBE_HANDLER);
-        }
-        if (channel.pipeline().get(EH_PACKET_SNIFFER) != null) {
-            channel.pipeline().remove(EH_PACKET_SNIFFER);
         }
     }
 }

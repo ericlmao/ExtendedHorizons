@@ -147,20 +147,21 @@ public final class FakeChunkOrchestratorService {
         Collection<FarPlayerState> visibleCandidates = null;
         boolean shouldUpdateFarPlayers = farPlayersEnabled && (chunkChanged || distanceChanged || !session.initiated() || isFarPlayerTick);
         if (shouldUpdateFarPlayers) {
+            visibleCandidates = new ArrayList<>();
             Collection<FarPlayerState> candidates = this.farPlayerCacheService.getNearbyPlayers(
                 world.getUID(), chunkX, chunkZ, targetDistance
             );
-            List<FarPlayerState> visible = new ArrayList<>(candidates.size());
-            for (FarPlayerState state : candidates) {
-                if (state.uuid().equals(player.getUniqueId())) {
-                    continue;
-                }
-                Player target = Bukkit.getPlayer(state.uuid());
-                if (target != null && target.isOnline() && player.canSee(target)) {
-                    visible.add(state);
+            if (!candidates.isEmpty()) {
+                for (FarPlayerState state : candidates) {
+                    if (state.uuid().equals(player.getUniqueId())) {
+                        continue;
+                    }
+                    Player target = Bukkit.getPlayer(state.uuid());
+                    if (target != null && target.isOnline() && player.canSee(target)) {
+                        visibleCandidates.add(state);
+                    }
                 }
             }
-            visibleCandidates = visible;
         }
 
         TickSnapshot snapshot = new TickSnapshot(
@@ -178,7 +179,15 @@ public final class FakeChunkOrchestratorService {
     }
 
     private void processOnNetty(Channel channel, PlayerSession session, TickSnapshot snapshot) {
-        session.setWorld(snapshot.worldId());
+        synchronized (session) {
+            this.processCurrentSnapshot(channel, session, snapshot);
+        }
+    }
+
+    private void processCurrentSnapshot(Channel channel, PlayerSession session, TickSnapshot snapshot) {
+        if (session.closed() || !snapshot.worldId().equals(session.worldId())) {
+            return;
+        }
         session.serverViewDistance(snapshot.serverDistance());
         session.moveTo(snapshot.chunkX(), snapshot.chunkZ(), snapshot.yaw());
         for (long key : session.drainPendingUnloads()) {
