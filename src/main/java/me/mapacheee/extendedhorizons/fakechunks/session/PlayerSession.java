@@ -6,13 +6,16 @@ import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
 
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 public final class PlayerSession {
 
@@ -55,6 +58,11 @@ public final class PlayerSession {
     private volatile long bandwidthTokens;
     private volatile long bandwidthLastRefillNanos;
     private final Deque<ChunkSendQueueEntry> chunkQueue = new ConcurrentLinkedDeque<>();
+    /** O(1) mirror of {@link #chunkQueue} size; ConcurrentLinkedDeque.size() walks the whole deque. */
+    private final AtomicInteger chunkQueueSize = new AtomicInteger();
+    /** Set whenever a queued build completes, so an unchanged queue can skip the drain scan. */
+    private volatile boolean drainDirty = true;
+    private volatile long drainCacheGeneration = Long.MIN_VALUE;
     private final Object dispatchLock = new Object();
     private final Map<UUID, Integer> trackedFarPlayers = new ConcurrentHashMap<>();
     private final Set<UUID> trackingBuffer = ConcurrentHashMap.newKeySet();
@@ -283,6 +291,52 @@ public final class PlayerSession {
         return this.chunkQueue;
     }
 
+    /** Constant-time queue size; the exact count is re-synced by every {@link #drainQueue}. */
+    public int chunkQueueSize() {
+        int size = this.chunkQueueSize.get();
+        return size < 0 ? 0 : size;
+    }
+
+    /** Flags that a queued build finished, so the next dispatch cycle has something to drain. */
+    public void markDrainDirty() {
+        this.drainDirty = true;
+    }
+
+    public boolean drainDirty() {
+        return this.drainDirty;
+    }
+
+    public void drainDirty(boolean dirty) {
+        this.drainDirty = dirty;
+    }
+
+    public long drainCacheGeneration() {
+        return this.drainCacheGeneration;
+    }
+
+    public void drainCacheGeneration(long generation) {
+        this.drainCacheGeneration = generation;
+    }
+
+    /**
+     * Removes every entry the filter accepts and returns how many entries were kept. Uses a plain
+     * iterator rather than {@code removeIf}, whose ConcurrentLinkedDeque implementation does a
+     * two-phase bulk-remove pass, and re-syncs the O(1) size counter from the walk it already does.
+     */
+    public int drainQueue(Predicate<ChunkSendQueueEntry> filter) {
+        int kept = 0;
+        for (Iterator<ChunkSendQueueEntry> iterator = this.chunkQueue.iterator(); iterator.hasNext();) {
+            ChunkSendQueueEntry entry = iterator.next();
+            if (filter.test(entry)) {
+                iterator.remove();
+            } else {
+                kept++;
+            }
+        }
+        this.chunkQueueSize.set(kept);
+        return kept;
+    }
+
     public boolean enqueueChunk(ChunkSendQueueEntry entry, UUID expectedWorldId, long expectedEpoch) {
         synchronized (this.dispatchLock) {
             if (this.closed || !this.enabled
@@ -291,6 +345,7 @@ public final class PlayerSession {
                 return false;
             }
             this.chunkQueue.addLast(entry);
+            this.chunkQueueSize.incrementAndGet();
             return true;
         }
     }
@@ -772,13 +827,21 @@ public final class PlayerSession {
     private void purgeQueuedChunk(int chunkX, int chunkZ) {
         long target = ChunkKeyCodec.pack(chunkX, chunkZ);
         synchronized (this.dispatchLock) {
-            this.chunkQueue.removeIf(entry -> {
+            int removed = 0;
+            for (Iterator<ChunkSendQueueEntry> iterator = this.chunkQueue.iterator(); iterator.hasNext();) {
+                ChunkSendQueueEntry entry = iterator.next();
                 if (entry.chunkKey() == target) {
+                    iterator.remove();
                     entry.releaseFuture();
-                    return true;
+                    removed++;
                 }
-                return false;
-            });
+            }
+            if (removed > 0) {
+                this.chunkQueueSize.addAndGet(-removed);
+                // Force the next dispatch cycle to walk the queue so the counter is re-synced
+                // exactly, even if this ran concurrently with a drain.
+                this.drainDirty = true;
+            }
         }
     }
 
@@ -788,6 +851,8 @@ public final class PlayerSession {
             while ((entry = this.chunkQueue.pollFirst()) != null) {
                 entry.releaseFuture();
             }
+            this.chunkQueueSize.set(0);
+            this.drainDirty = true;
         }
     }
 

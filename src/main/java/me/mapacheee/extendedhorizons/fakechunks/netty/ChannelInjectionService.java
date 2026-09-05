@@ -7,6 +7,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.EventLoop;
 import io.netty.channel.ChannelPromise;
+import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 import me.mapacheee.extendedhorizons.fakechunks.session.PlayerSession;
 import me.mapacheee.extendedhorizons.fakechunks.util.ChunkKeyCodec;
@@ -32,6 +33,13 @@ public final class ChannelInjectionService {
     public static final String EH_PACKET_SNIFFER = "eh_packet_sniffer";
     private static final int SHUTDOWN_WAIT_SECONDS = 5;
 
+    /** Session currently bound to this channel's {@link EhPacketHandler}, as last observed. */
+    private static final AttributeKey<PlayerSession> BOUND_SESSION =
+        AttributeKey.valueOf("extendedhorizons.bound_session");
+    /** True once the handler is installed and no packet-id probe is still needed. */
+    private static final AttributeKey<Boolean> PIPELINE_READY =
+        AttributeKey.valueOf("extendedhorizons.pipeline_ready");
+
     private volatile boolean stopping;
 
     public void inject(Player player) {
@@ -44,6 +52,12 @@ public final class ChannelInjectionService {
         }
         Channel channel = this.resolveChannel(player);
         if (channel == null || !channel.isActive()) {
+            return;
+        }
+        // tickPlayer() calls inject() for every player every runtime tick. Once the pipeline is
+        // set up and bound to this session there is nothing for the task to do, and submitting it
+        // anyway forces an eventfd wake-up of the player's Netty event loop every tick.
+        if (!needsPipelineWork(channel, session)) {
             return;
         }
         Runnable action = () -> {
@@ -63,6 +77,7 @@ public final class ChannelInjectionService {
             if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
                 handler.setSession(session);
                 removePacketIdProbeIfResolved(channel);
+                markPipelineState(channel, session);
                 return;
             }
             if (channel.pipeline().get("packet_handler") == null) {
@@ -73,6 +88,7 @@ public final class ChannelInjectionService {
             channel.pipeline().addBefore("packet_handler", EH_HANDLER, handler);
             PacketIdRegistry.resolveFromEncoder(channel);
             removePacketIdProbeIfResolved(channel);
+            markPipelineState(channel, session);
         };
         this.runOnEventLoop(channel, action);
     }
@@ -125,6 +141,11 @@ public final class ChannelInjectionService {
         if (this.stopping || channel == null || !channel.isActive()) {
             return;
         }
+        // Same per-tick call site as inject(); skip the event-loop hop when the handler already
+        // holds this session.
+        if (isBoundTo(channel, session)) {
+            return;
+        }
         Runnable action = () -> {
             if (this.stopping) {
                 removeHandlers(channel);
@@ -132,6 +153,7 @@ public final class ChannelInjectionService {
             }
             if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
                 handler.setSession(session);
+                channel.attr(BOUND_SESSION).set(session);
             }
         };
         this.runOnEventLoop(channel, action);
@@ -267,7 +289,49 @@ public final class ChannelInjectionService {
         eventLoop.execute(action);
     }
 
+    /**
+     * Called on the event loop once the pipeline is in its desired state, so that the next
+     * per-tick inject()/bindSession() can be short-circuited without touching the pipeline.
+     */
+    private static void markPipelineState(Channel channel, PlayerSession session) {
+        markPipelineState(channel, session, needsPacketIdProbe());
+    }
+
+    static void markPipelineState(Channel channel, PlayerSession session, boolean probeNeeded) {
+        channel.attr(BOUND_SESSION).set(session);
+        channel.attr(PIPELINE_READY).set(!probeNeeded);
+    }
+
+    /** Clears the cached pipeline state so the next inject() rebuilds it. */
+    static void invalidatePipelineState(Channel channel) {
+        if (channel == null) {
+            return;
+        }
+        channel.attr(PIPELINE_READY).set(Boolean.FALSE);
+        channel.attr(BOUND_SESSION).set(null);
+    }
+
+    static boolean needsPipelineWork(Channel channel, PlayerSession session) {
+        return needsPipelineWork(channel, session, needsPacketIdProbe());
+    }
+
+    static boolean needsPipelineWork(Channel channel, PlayerSession session, boolean probeNeeded) {
+        if (probeNeeded) {
+            return true;
+        }
+        if (!Boolean.TRUE.equals(channel.attr(PIPELINE_READY).get())) {
+            return true;
+        }
+        return channel.attr(BOUND_SESSION).get() != session;
+    }
+
+    private static boolean isBoundTo(Channel channel, PlayerSession session) {
+        return Boolean.TRUE.equals(channel.attr(PIPELINE_READY).get())
+            && channel.attr(BOUND_SESSION).get() == session;
+    }
+
     private static void removeHandlers(Channel channel) {
+        invalidatePipelineState(channel);
         if (channel.pipeline().get(EH_HANDLER) instanceof EhPacketHandler handler) {
             handler.setSession(null);
             channel.pipeline().remove(EH_HANDLER);

@@ -50,6 +50,15 @@ public final class EhPacketHandler extends ChannelOutboundHandlerAdapter {
     private volatile PlayerSession session;
 
     @Override
+    public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+        // Whoever removed us (us, another plugin, or channel teardown) invalidates the cached
+        // "pipeline is ready" flag, so the next inject() rebuilds the pipeline instead of
+        // short-circuiting.
+        ChannelInjectionService.invalidatePipelineState(ctx.channel());
+        super.handlerRemoved(ctx);
+    }
+
+    @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         try {
             if (msg instanceof ClientboundLevelChunkWithLightPacket) {

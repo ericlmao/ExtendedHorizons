@@ -53,6 +53,12 @@ public final class FarPlayerCacheService {
         this.statesCache = Caffeine.newBuilder()
             .maximumSize(maxEntries)
             .expireAfterWrite(ttl)
+            // updateState() replaces this entry once per player per runtime tick. With the
+            // default (ForkJoinPool.commonPool) executor every replacement dispatches an async
+            // removal notification, which costs a ForkJoinPool.execute + pthread_cond_signal
+            // wake-up on the main thread. The listener only filters on the cause, so running it
+            // (and Caffeine's own maintenance) on the calling thread is strictly cheaper.
+            .executor(Runnable::run)
             .removalListener((UUID playerId, FarPlayerState state, RemovalCause cause) -> {
                 if (cause != RemovalCause.REPLACED) {
                     this.removeFromSpatialIndex(playerId, this.playerLastWorld.remove(playerId), this.playerLastRegion.remove(playerId));
@@ -157,7 +163,22 @@ public final class FarPlayerCacheService {
         int minRegionZ = minChunkZ >> REGION_SIZE_BITS;
         int maxRegionZ = maxChunkZ >> REGION_SIZE_BITS;
 
-        List<FarPlayerState> nearby = new ArrayList<>();
+        // Size the result up front: growing the default 10-element ArrayList reallocates and
+        // copies on every busy region sweep, and this runs per player per far-player tick.
+        int expected = 0;
+        for (int rx = minRegionX; rx <= maxRegionX; rx++) {
+            for (int rz = minRegionZ; rz <= maxRegionZ; rz++) {
+                Set<UUID> playerIds = regions.get(ChunkKeyCodec.pack(rx, rz));
+                if (playerIds != null) {
+                    expected += playerIds.size();
+                }
+            }
+        }
+        if (expected == 0) {
+            return Collections.emptyList();
+        }
+
+        List<FarPlayerState> nearby = new ArrayList<>(expected);
         for (int rx = minRegionX; rx <= maxRegionX; rx++) {
             for (int rz = minRegionZ; rz <= maxRegionZ; rz++) {
                 Set<UUID> playerIds = regions.get(ChunkKeyCodec.pack(rx, rz));

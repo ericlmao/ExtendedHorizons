@@ -45,6 +45,7 @@ public final class RuntimeOrchestratorService {
     private static final EquipmentSlot[] EQUIPMENT_SLOTS = EquipmentSlot.values();
     private static final int EQUIPMENT_SLOT_COUNT = EQUIPMENT_SLOTS.length;
     private static final int CACHE_CLEANUP_INTERVAL = 200;
+    private static final int VANISH_REFRESH_INTERVAL = 4;
     private static final int DEBUG_METRICS_LOG_INTERVAL = 200;
     private static final double CACHE_HIT_RATE_SCALE = 10_000.0d;
     private static final double PERCENTAGE_DIVISOR = 100.0d;
@@ -60,6 +61,7 @@ public final class RuntimeOrchestratorService {
     private final AntiXrayPayloadCacheService antiXrayPayloadCacheService;
 
     private final Map<UUID, List<Pair<EquipmentSlot, ItemStack>>> lastEquipment = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> vanishCache = new ConcurrentHashMap<>();
     private final List<Player> playerBuffer = new ArrayList<>();
 
     private volatile ScheduledTask runtimeTask;
@@ -119,6 +121,9 @@ public final class RuntimeOrchestratorService {
         this.orchestratorTick = (this.orchestratorTick + 1) & Integer.MAX_VALUE;
         boolean farPlayersEnabled = config.farPlayersEnabled();
         boolean pollEquipment = farPlayersEnabled && Math.floorMod(this.orchestratorTick, config.farPlayerEquipTicks()) == 0;
+        // Player.getMetadata("vanished") allocates a list on every call; polling it for every
+        // player every tick showed up on the main thread. Re-read it on a slower cadence.
+        boolean refreshVanish = Math.floorMod(this.orchestratorTick, VANISH_REFRESH_INTERVAL) == 0;
 
         for (Player player : this.playerBuffer) {
             FoliaTaskUtil.runForPlayer(player, plugin, () -> {
@@ -129,7 +134,7 @@ public final class RuntimeOrchestratorService {
                     Location loc = player.getLocation();
                     ServerPlayer nmsPlayer = ((CraftPlayer) player).getHandle();
 
-                    if (player.getGameMode() == GameMode.SPECTATOR || isVanished(player)) {
+                    if (player.getGameMode() == GameMode.SPECTATOR || this.isVanished(player, refreshVanish)) {
                         this.farPlayerCacheService.removePlayer(player.getUniqueId());
                     } else if (farPlayersEnabled) {
                         FarPlayerState oldState = this.farPlayerCacheService.getState(player.getUniqueId());
@@ -236,6 +241,7 @@ public final class RuntimeOrchestratorService {
      */
     public void removePlayer(UUID playerId) {
         this.lastEquipment.remove(playerId);
+        this.vanishCache.remove(playerId);
     }
 
     private void cancelTask() {
@@ -251,7 +257,20 @@ public final class RuntimeOrchestratorService {
         }
     }
 
-    private static boolean isVanished(Player player) {
+    private boolean isVanished(Player player, boolean refresh) {
+        UUID playerId = player.getUniqueId();
+        if (!refresh) {
+            Boolean cached = this.vanishCache.get(playerId);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        boolean vanished = readVanished(player);
+        this.vanishCache.put(playerId, vanished);
+        return vanished;
+    }
+
+    private static boolean readVanished(Player player) {
         var metadata = player.getMetadata("vanished");
         for (var entry : metadata) {
             if (entry.asBoolean()) {

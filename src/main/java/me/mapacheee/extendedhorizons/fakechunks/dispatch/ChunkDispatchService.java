@@ -83,13 +83,13 @@ public final class ChunkDispatchService {
         if (debug) {
             LOGGER.info(
                 "EH dispatch: inFlight={} queueSize={} maxInflight={} maxQueueSize={} chunksPerTick={}",
-                inFlight, session.chunkQueue().size(), maxInflight, maxQueueSize, chunksPerTick
+                inFlight, session.chunkQueueSize(), maxInflight, maxQueueSize, chunksPerTick
             );
         }
 
-        // ConcurrentLinkedDeque.size() is O(n); count once and track locally
-        // instead of re-walking the queue every loop iteration.
-        int queueSize = session.chunkQueue().size();
+        // drainCompletedEntries() already returns the number of entries left in the queue, so
+        // there is no need for a second O(n) ConcurrentLinkedDeque.size() walk here.
+        int queueSize = inFlight;
         while (true) {
             if (inFlight >= maxInflight) { break; }
             if (queueSize >= maxQueueSize) { break; }
@@ -128,6 +128,8 @@ public final class ChunkDispatchService {
                 session.onChunkBuildFailed(chunkKey);
                 break;
             }
+            // Lets drainCompletedEntries() skip its O(queue) scan on ticks where nothing finished.
+            buildFuture.whenComplete((payload, throwable) -> session.markDrainDirty());
             inFlight++;
             queueSize++;
             if (--chunksPerTick <= 0) { break; }
@@ -135,8 +137,19 @@ public final class ChunkDispatchService {
     }
 
     private int drainCompletedEntries(World world, Channel channel, PlayerSession session, int maxSendPerCycle) {
+        long cacheGeneration = this.cacheService.generation();
+        if (!needsDrainScan(session, cacheGeneration)) {
+            // An empty deque means nothing is in flight no matter what the cached counter says;
+            // reporting a stale non-zero count here would wedge the dispatch loop on maxInflight.
+            return session.chunkQueue().peekFirst() == null ? 0 : session.chunkQueueSize();
+        }
+        // Cleared before the walk so a build completing mid-walk re-arms the next cycle.
+        session.drainDirty(false);
+        session.drainCacheGeneration(cacheGeneration);
+
         int[] counters = {0, 0};
-        session.chunkQueue().removeIf(entry -> {
+        boolean[] deferred = {false};
+        int kept = session.drainQueue(entry -> {
             if (!this.isQueueEntryValid(world, session, entry)) {
                 session.onChunkBuildFailed(entry.chunkKey());
                 entry.releaseFuture();
@@ -158,20 +171,44 @@ public final class ChunkDispatchService {
                     entry.releaseFuture();
                     return true;
                 }
-                counters[0]++;
                 return false;
             }
             if (counters[1] >= maxSendPerCycle && !entry.buildFuture().isCompletedExceptionally()) {
-                counters[0]++;
+                deferred[0] = true;
                 return false;
             }
             boolean processed = this.checkQueueEntry(world, channel, session, entry, counters);
             if (!processed) {
-                counters[0]++;
+                deferred[0] = true;
             }
             return processed;
         });
-        return counters[0];
+        if (deferred[0]) {
+            // A finished build was left in the queue (send budget, bandwidth or a non-writable
+            // channel); make sure the next cycle scans again instead of short-circuiting.
+            session.markDrainDirty();
+        }
+        return kept;
+    }
+
+    /**
+     * The drain only has work when a build finished, the chunk cache was invalidated, or the
+     * oldest queued build has blown its timeout. Entries are appended in order, so the head is
+     * always the oldest and a single O(1) peek covers the timeout case.
+     */
+    static boolean needsDrainScan(PlayerSession session, long cacheGeneration) {
+        return needsDrainScan(session, cacheGeneration, System.nanoTime(), BUILD_TIMEOUT_NANOS);
+    }
+
+    static boolean needsDrainScan(PlayerSession session, long cacheGeneration, long nowNanos, long timeoutNanos) {
+        if (session.drainDirty() || session.drainCacheGeneration() != cacheGeneration) {
+            return true;
+        }
+        ChunkSendQueueEntry head = session.chunkQueue().peekFirst();
+        if (head == null) {
+            return false;
+        }
+        return nowNanos - head.queuedAtNanos() > timeoutNanos;
     }
 
     public void sendUnload(Channel channel, PlayerSession session, long chunkKey) {

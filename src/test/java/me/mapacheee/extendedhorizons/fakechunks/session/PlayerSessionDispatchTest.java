@@ -112,6 +112,54 @@ class PlayerSessionDispatchTest {
         assertEquals(0L, session.beginChunkSend(chunkKey));
     }
 
+    @Test
+    void drainQueueKeepsTheConstantTimeSizeCounterExact() {
+        PlayerSession session = readySession();
+        ChunkSendQueueEntry first = queueEntry(session, 1L);
+        ChunkSendQueueEntry second = queueEntry(session, 2L);
+        ChunkSendQueueEntry third = queueEntry(session, 3L);
+        assertTrue(session.enqueueChunk(first, session.worldId(), session.epoch()));
+        assertTrue(session.enqueueChunk(second, session.worldId(), session.epoch()));
+        assertTrue(session.enqueueChunk(third, session.worldId(), session.epoch()));
+        assertEquals(3, session.chunkQueueSize());
+
+        int kept = session.drainQueue(entry -> entry.chunkKey() == 2L);
+
+        assertEquals(2, kept);
+        assertEquals(2, session.chunkQueueSize());
+        assertEquals(2, session.chunkQueue().size());
+
+        session.close();
+        assertEquals(0, session.chunkQueueSize());
+        assertEquals(0, session.chunkQueue().size());
+    }
+
+    @Test
+    void drainStaysArmedUntilTheQueueIsScanned() {
+        PlayerSession session = readySession();
+        // A fresh session must always scan once.
+        assertTrue(session.drainDirty());
+
+        session.drainDirty(false);
+        assertFalse(session.drainDirty());
+
+        session.markDrainDirty();
+        assertTrue(session.drainDirty());
+
+        session.drainCacheGeneration(7L);
+        assertEquals(7L, session.drainCacheGeneration());
+    }
+
+    private static ChunkSendQueueEntry queueEntry(PlayerSession session, long chunkKey) {
+        return new ChunkSendQueueEntry(
+            chunkKey,
+            session.worldId(),
+            session.epoch(),
+            1L,
+            new CompletableFuture<>()
+        );
+    }
+
     private static PlayerSession readySession() {
         PlayerSession session = new PlayerSession(UUID.randomUUID(), UUID.randomUUID());
         session.setChunkPos(0, 0);
